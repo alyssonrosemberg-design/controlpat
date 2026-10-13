@@ -152,7 +152,7 @@ function bens(){
   <button onclick="exportar('xlsx')">⬇ Excel</button><button onclick="exportar('csv')">⬇ CSV</button></div></div>
   <div class="card tw"><table><tr><th>Tombo</th><th>Descrição</th><th>Local</th><th>Status</th><th>Valor atual</th><th>Conferido</th><th></th></tr>
   ${r.map(b=>`<tr><td><b>${esc(b.tombo)}</b></td><td>${esc(b.descricao)}</td><td>${esc(L(b.local_id))}</td><td><span class="tag">${esc(b.status)}</span></td><td>${b.status==='Baixado'?'—':brl(deprec(b).atual)}</td><td class="${b.verificado_em?'':'warn'}">${dt(b.verificado_em)}</td>
-  <td><button class="sm" onclick="showFicha('${b.id}')">Ficha</button> <button class="sm" onclick="showQR('${b.id}')">QR</button></td></tr>`).join('')||'<tr><td colspan="7" class="mut">Nenhum bem encontrado.</td></tr>'}</table></div>`;
+  <td><button class="sm" onclick="showFicha('${b.id}')">Ficha</button> <button class="sm" onclick="showQR('${b.id}')">QR</button>${adm()?` <button class="sm" onclick="formBem('${b.id}')">Editar</button> <button class="sm bad" onclick="delBem('${b.id}')">Excluir</button>`:''}</td></tr>`).join('')||'<tr><td colspan="7" class="mut">Nenhum bem encontrado.</td></tr>'}</table></div>`;
   $('#fq').oninput=e=>{F.q=e.target.value;clearTimeout(bens.t);bens.t=setTimeout(()=>{bens();const i=$('#fq');i.focus();i.setSelectionRange(F.q.length,F.q.length)},250)};
   $('#fl').onchange=e=>{F.l=e.target.value;bens()};$('#fs').onchange=e=>{F.s=e.target.value;bens()};
   if($('#imp'))$('#imp').onchange=e=>importar(e.target.files[0]);}
@@ -192,6 +192,7 @@ function formBem(id){
   <p id="ferr" class="err"></p><div class="row" style="justify-content:flex-end"><button onclick="$('#dlg').close()">Cancelar</button><button class="pri" id="sv" onclick="saveBem('${id||''}')">Salvar</button></div>`;
   if(!$('#dlg').open)$('#dlg').showModal()}
 async function saveBem(id){
+  if(!adm())return;
   const o={};$('#dlg').querySelectorAll('[name]').forEach(e=>o[e.name]=e.value.trim());
   if(!o.tombo||!o.descricao){$('#ferr').textContent='Informe tombo e descrição.';return}
   if(S.bens.some(x=>x.tombo.toLowerCase()===o.tombo.toLowerCase()&&x.id!==id)){$('#ferr').textContent='Este tombo já existe.';return}
@@ -205,7 +206,7 @@ async function saveBem(id){
   await Repo.upsert('bens',b);
   if(!old)await mov(b,'Cadastro',null,b.local_id);else if(old.local_id!==b.local_id)await mov(b,'Transferência',old.local_id,b.local_id);
   $('#dlg').close();await refresh()}
-async function delBem(id){if(!confirm('Excluir este bem e todo o seu histórico?'))return;
+async function delBem(id){if(!adm())return;if(!confirm('Excluir este bem e todo o seu histórico?'))return;
   const b=S.bens.find(x=>x.id===id);if(b.foto_path)sb.storage.from(BUCKET).remove([b.foto_path]);await Repo.remove('bens',id);$('#dlg').close();await refresh()}
 
 /* ---- Manutenção ---- */
@@ -270,9 +271,15 @@ async function importar(file){
 /* ======== LOCAIS / USUÁRIOS ======== */
 function locais(){
   $('#main').innerHTML=`${adm()?`<div class="card"><div class="row"><input id="ln" placeholder="Nome do local"><input id="ls" placeholder="Setor / prédio (opcional)"><button class="pri" onclick="addLocal()">Adicionar</button></div></div>`:''}
-  <div class="card tw"><table><tr><th>Local</th><th>Setor</th><th>Bens</th><th></th></tr>${S.locais.map(l=>`<tr><td><b>${esc(l.nome)}</b></td><td>${esc(l.setor)}</td><td>${S.bens.filter(b=>b.local_id===l.id).length}</td><td>${adm()?`<button class="sm bad" onclick="delLocal('${l.id}')">✕</button>`:''}</td></tr>`).join('')}</table></div>`}
-async function addLocal(){const n=$('#ln').value.trim();if(!n)return;await Repo.upsert('locais',{nome:n,setor:$('#ls').value.trim()||null});await refresh()}
-async function delLocal(id){if(S.bens.some(b=>b.local_id===id))return alert('Há bens neste local. Transfira-os antes.');await Repo.remove('locais',id);await refresh()}
+  <div class="card tw"><table><tr><th>Local</th><th>Setor</th><th>Bens</th><th></th></tr>${S.locais.map(l=>`<tr><td><b>${esc(l.nome)}</b></td><td>${esc(l.setor)}</td><td>${S.bens.filter(b=>b.local_id===l.id).length}</td><td>${adm()?`<button class="sm" onclick="editLocal('${l.id}')">Editar</button> <button class="sm bad" onclick="delLocal('${l.id}')">Excluir</button>`:''}</td></tr>`).join('')}</table></div>`}
+async function addLocal(){if(!adm())return;const n=$('#ln').value.trim();if(!n)return;await Repo.upsert('locais',{nome:n,setor:$('#ls').value.trim()||null});await refresh()}
+function editLocal(id){if(!adm())return;const l=S.locais.find(x=>x.id===id);
+  $('#dlg').innerHTML=`<h3 style="margin-top:0">Editar local</h3><div class="g2"><div><label>Nome *</label><input id="en" value="${esc(l.nome)}"></div><div><label>Setor / prédio</label><input id="es" value="${esc(l.setor)}"></div></div>
+  <p id="lerr" class="err"></p><div class="row" style="justify-content:flex-end"><button onclick="$('#dlg').close()">Cancelar</button><button class="pri" onclick="saveLocal('${id}')">Salvar</button></div>`;$('#dlg').showModal()}
+async function saveLocal(id){if(!adm())return;const n=$('#en').value.trim();if(!n){$('#lerr').textContent='Informe o nome.';return}
+  if(S.locais.some(x=>x.id!==id&&x.nome.toLowerCase()===n.toLowerCase())){$('#lerr').textContent='Já existe um local com este nome.';return}
+  const l=S.locais.find(x=>x.id===id);await Repo.upsert('locais',{...l,nome:n,setor:$('#es').value.trim()||null});$('#dlg').close();await refresh()}
+async function delLocal(id){if(!adm())return;if(S.bens.some(b=>b.local_id===id))return alert('Há bens neste local. Transfira-os antes.');if(!confirm('Excluir este local?'))return;await Repo.remove('locais',id);await refresh()}
 function users(){
   $('#main').innerHTML=`<div class="card tw"><table><tr><th>E-mail</th><th>Nome</th><th>Perfil</th><th>Ativo</th></tr>${S.perfis.map(p=>`<tr><td>${esc(p.email)}</td><td>${esc(p.nome)}</td>
   <td><select onchange="setPerfil('${p.id}',{papel:this.value})"><option ${p.papel==='admin'?'selected':''}>admin</option><option ${p.papel==='conferente'?'selected':''}>conferente</option></select></td>
