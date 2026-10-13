@@ -92,8 +92,11 @@ function deprec(b){const v=+b.valor||0,r=+b.valor_residual||0,n=+b.vida_util_ano
 async function boot(){
   const{data:{session}}=await sb.auth.getSession();
   if(!session){ME=null;return loginView()}
-  const{data}=await sb.from('perfis').select('*').eq('id',session.user.id).single();
-  if(!data||!data.ativo){$('#app').innerHTML=`<div class="card" id="login"><p>Seu acesso ainda não foi liberado por um administrador.</p><button onclick="sb.auth.signOut()">Sair</button></div>`;return}
+  const getP=()=>sb.from('perfis').select('*').eq('id',session.user.id).maybeSingle();
+  let{data,error}=await getP();
+  if(!data){await sb.rpc('garantir_perfil');({data,error}=await getP())}
+  if(!data||!data.ativo){const why=error?'Erro do banco: '+error.message:(data?'Sua conta está desativada.':'Perfil não encontrado para '+session.user.email+'.');
+    $('#app').innerHTML=`<div class="card" id="login"><p>Seu acesso ainda não foi liberado por um administrador.</p><p class="err" style="font-size:13px">${esc(why)}</p><button onclick="sb.auth.signOut()">Sair</button></div>`;return}
   ME=data;shell();await refresh()}
 function loginView(msg=''){
   $('#app').innerHTML=`<div class="card" id="login"><h1>📦 Controle de Patrimônio</h1><p class="mut">Entre com sua conta.</p>
