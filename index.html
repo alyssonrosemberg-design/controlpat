@@ -73,13 +73,13 @@ const Repo={
   async list(t){const{data,error}=await sb.from(t).select('*');if(error)throw error;return data},
   async upsert(t,r,oc){const{data,error}=await sb.from(t).upsert(r,oc?{onConflict:oc}:{}).select();if(error)throw error;return data},
   async remove(t,id){const{error}=await sb.from(t).delete().eq('id',id);if(error)throw error},
-  async rpc(f,a){const{error}=await sb.rpc(f,a);if(error)throw error}
+  async rpc(f,a){const{data,error}=await sb.rpc(f,a);if(error)throw error;return data}
 };
 let S={},ME=null,view='dash',sc=null,sess=[],lastScan={c:'',t:0},modo='consulta',invLocal='',F={q:'',l:'',s:''};
 const adm=()=>ME?.papel==='admin';
 async function refresh(){
-  const T=['locais','bens','movimentacoes','manutencoes','baixas'];if(adm())T.push('perfis');
-  const r=await Promise.all(T.map(t=>Repo.list(t)));T.forEach((t,i)=>S[t]=r[i]);render()}
+  const T=['locais','bens','movimentacoes','manutencoes','baixas','conferencias','conferencia_itens'];if(adm())T.push('perfis');
+  const r=await Promise.all(T.map(t=>Repo.list(t).catch(e=>{if(t.startsWith('conferencia'))return [];throw e})));T.forEach((t,i)=>S[t]=r[i]);render()}
 const L=id=>(S.locais.find(l=>l.id===id)||{}).nome||'— sem local —';
 const nextTombo=()=>'PAT-'+String(S.bens.reduce((m,b)=>Math.max(m,parseInt((b.tombo||'').replace(/\D/g,''))||0),0)+1).padStart(6,'0');
 const mov=(b,tipo,de,para,obs)=>Repo.upsert('movimentacoes',{bem_id:b.id,tipo,de_local_id:de||null,para_local_id:para||null,obs:obs||null});
@@ -110,14 +110,14 @@ function loginView(msg=''){
   $('#pw').onkeydown=e=>{if(e.key==='Enter')$('#bi').click()}}
 sb.auth.onAuthStateChange((ev)=>{if(ev==='SIGNED_IN'||ev==='SIGNED_OUT')setTimeout(boot,0)});
 function shell(){
-  const nav=[['dash','Painel'],['bens','Bens'],['scan','Leitor / Inventário'],['labels','Etiquetas QR'],['locais','Locais']];if(adm())nav.push(['users','Usuários']);
+  const nav=[['dash','Painel'],['bens','Bens'],['scan','Leitor / Inventário'],['conf','Conferências'],['labels','Etiquetas QR'],['locais','Locais']];if(adm())nav.push(['users','Usuários']);
   $('#app').innerHTML=`<header><div class="top"><h1>📦 Patrimônio</h1><div class="mut" style="font-size:13px">${esc(ME.email)} · <span class="tag">${ME.papel}</span> <button class="sm" onclick="sb.auth.signOut()">Sair</button></div></div>
   <nav id="nav">${nav.map(n=>`<button data-v="${n[0]}">${n[1]}</button>`).join('')}</nav></header><main id="main"></main>`;
   $('#nav').onclick=e=>{const v=e.target.dataset.v;if(v){view=v;render()}}}
 function render(){
   if(!ME||!$('#main'))return;
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('on',b.dataset.v===view));
-  if(view!=='scan')stopScan();({dash,bens,locais,scan,labels,users})[view]()}
+  if(view!=='scan')stopScan();({dash,bens,locais,scan,conf:confs,labels,users})[view]()}
 
 /* ======== QR ======== */
 function qrSvg(t){const q=qrcode(0,'M');q.addData(t);q.make();return q.createSvgTag(4,0)}
@@ -296,7 +296,7 @@ function scan(){
   <div id="reader" style="margin-top:10px"></div><p id="cerr" class="err"></p>
   <div class="row"><input id="man" placeholder="Ou digite o tombo (ex.: PAT-000001)"><button onclick="onCode($('#man').value)">Buscar</button></div></div><div id="res"></div><div id="inv"></div>`;
   $('#md').value=modo;$('#il').value=invLocal||S.locais[0]?.id||'';invLocal=$('#il').value;$('#invw').style.display=modo==='inv'?'':'none';
-  $('#md').onchange=e=>{modo=e.target.value;$('#invw').style.display=modo==='inv'?'':'none';invList()};$('#il').onchange=e=>{invLocal=e.target.value;sess=[];invList()};
+  $('#md').onchange=e=>{modo=e.target.value;$('#invw').style.display=modo==='inv'?'':'none';invList()};$('#il').onchange=e=>{invLocal=e.target.value;sess=[];curConf=null;invList()};
   $('#man').onkeydown=e=>{if(e.key==='Enter')onCode($('#man').value)};$('#bs').onclick=startScan;$('#bx').onclick=stopScan;invList()}
 async function startScan(){try{sc=new Html5Qrcode('reader');await sc.start({facingMode:'environment'},{fps:10,qrbox:230},c=>onCode(c));$('#bs').style.display='none';$('#bx').style.display=''}
   catch(e){$('#cerr').textContent='Não foi possível abrir a câmera (verifique a permissão/HTTPS ou use a digitação manual).';sc=null}}
@@ -309,18 +309,40 @@ function onCode(code){code=(code||'').trim();if(!code)return;const n=Date.now();
   <p style="margin:6px 0">${esc(b.descricao)}<br><span class="mut">${esc([b.marca,b.modelo,b.serie&&'S/N '+b.serie].filter(Boolean).join(' · '))}</span></p>
   <p class="mut" style="margin:4px 0">Local: <b>${esc(L(b.local_id))}</b> · Resp.: ${esc(b.responsavel||'—')}<br>Última conferência: ${dt(b.verificado_em)}</p>${dif?'<p class="warn">⚠ Cadastrado em outro local.</p>':''}
   <div class="row" style="margin-top:8px">${modo==='inv'?`<button class="pri" onclick="conf('${b.id}',false)">✔ Confirmar presença</button>${dif?`<button onclick="conf('${b.id}',true)">Mover para ${esc(L(invLocal))}</button>`:''}`:`<button onclick="showFicha('${b.id}')">Abrir ficha</button><button onclick="conf('${b.id}',false)">Registrar conferência</button>`}</div></div>`}
+let curConf=null;
+async function reload(){const[b,m,c,i]=await Promise.all([Repo.list('bens'),Repo.list('movimentacoes'),Repo.list('conferencias').catch(()=>S.conferencias||[]),Repo.list('conferencia_itens').catch(()=>S.conferencia_itens||[])]);S.bens=b;S.movs=m;S.conferencias=c;S.conferencia_itens=i}
 async function conf(id,move){
-  await Repo.rpc('conferir_bem',{p_bem:id,p_local:modo==='inv'?invLocal:null,p_mover:move});
-  if(modo==='inv'&&!sess.includes(id))sess.push(id);S.bens=await Repo.list('bens');S.movs=await Repo.list('movimentacoes');
-  $('#res').innerHTML=`<div class="card ok">✔ ${esc(S.bens.find(x=>x.id===id).tombo)} conferido.</div>`;invList()}
+  const b0=S.bens.find(x=>x.id===id);
+  try{
+    if(modo==='inv'&&!curConf)curConf=await Repo.rpc('iniciar_conferencia',{p_local:invLocal,p_tipo:'Inventário'});
+    await Repo.rpc('conferir_bem',{p_bem:id,p_local:modo==='inv'?invLocal:null,p_mover:move,p_conf:modo==='inv'?curConf:null});
+    if(modo==='inv'&&!sess.includes(id))sess.push(id);
+    await reload();
+    const b=S.bens.find(x=>x.id===id);
+    if(!b.verificado_em||b.verificado_em===b0.verificado_em)throw new Error('O banco não registrou a conferência.');
+    $('#res').innerHTML=`<div class="card ok">✔ ${esc(b.tombo)} conferido em ${new Date(b.verificado_em).toLocaleString('pt-BR')} e gravado no banco.</div>`;
+  }catch(e){$('#res').innerHTML=`<div class="card err"><b>Falha ao registrar a conferência:</b> ${esc(e.message||e)}<br><span class="mut">Se citar função ou tabela inexistente, rode o conferencia.sql no Supabase.</span></div>`}
+  invList()}
 function invList(){const w=$('#inv');if(!w)return;if(modo!=='inv'){w.innerHTML='';return}
   const esp=S.bens.filter(b=>b.local_id===invLocal&&b.status!=='Baixado'),falt=esp.filter(b=>!sess.includes(b.id));
   w.innerHTML=`<div class="card"><b>Inventário: ${esc(L(invLocal))}</b><p class="mut" style="margin:4px 0">${sess.length} conferidos · <span class="${falt.length?'warn':'ok'}">${falt.length} faltando</span> de ${esp.length}</p>
   ${falt.map(b=>`<div style="padding:5px 0;border-top:1px solid var(--bd)"><b>${esc(b.tombo)}</b> ${esc(b.descricao)}</div>`).join('')}
-  ${falt.length?`<button class="sm bad" style="margin-top:8px" onclick="marcarFalt()">Marcar faltantes como “Não localizado”</button>`:''}</div>`}
-async function marcarFalt(){if(!confirm('Marcar os bens faltantes como Não localizado?'))return;
-  for(const b of S.bens.filter(b=>b.local_id===invLocal&&b.status!=='Baixado'&&!sess.includes(b.id)))await Repo.rpc('marcar_nao_localizado',{p_bem:b.id});
-  S.bens=await Repo.list('bens');invList()}
+  <label style="margin-top:10px;display:flex;gap:6px;align-items:center;font-size:14px;color:var(--tx)"><input type="checkbox" id="mk" style="width:auto"> Marcar faltantes como “Não localizado”</label>
+  <button class="pri" style="margin-top:8px" onclick="finalizarInv()">Finalizar inventário</button></div>`}
+async function finalizarInv(){
+  if(!sess.length&&!confirm('Nenhum bem foi conferido. Finalizar mesmo assim (todos ficarão como faltantes)?'))return;
+  const mk=$('#mk').checked;if(!curConf)curConf=await Repo.rpc('iniciar_conferencia',{p_local:invLocal,p_tipo:'Inventário'});
+  await Repo.rpc('finalizar_conferencia',{p_conf:curConf,p_marcar:mk});
+  const id=curConf;curConf=null;sess=[];await reload();$('#res').innerHTML='';invList();showConf(id)}
+const confTot=c=>{const it=(S.conferencia_itens||[]).filter(i=>i.conferencia_id===c.id),n=r=>it.filter(i=>i.resultado===r).length;return{ok:it.length-n('Faltante'),falt:n('Faltante'),div:n('Local divergente')+n('Movido'),it}};
+function confs(){
+  const r=[...(S.conferencias||[])].sort((a,b)=>a.iniciada_em<b.iniciada_em?1:-1);
+  $('#main').innerHTML=`<div class="card tw"><table><tr><th>Data</th><th>Tipo</th><th>Local</th><th>Responsável</th><th>Conferidos</th><th>Faltantes</th><th>Divergentes</th><th></th></tr>
+  ${r.map(c=>{const t=confTot(c);return `<tr><td>${new Date(c.iniciada_em).toLocaleString('pt-BR')}${c.finalizada_em?'':' <span class="tag warn">em andamento</span>'}</td><td>${esc(c.tipo)}</td><td>${esc(L(c.local_id))}</td><td>${esc(c.usuario_email)}</td><td>${t.ok}</td><td class="${t.falt?'warn':''}">${t.falt}</td><td>${t.div}</td><td><button class="sm" onclick="showConf('${c.id}')">Detalhes</button></td></tr>`}).join('')||'<tr><td colspan="8" class="mut">Nenhuma conferência registrada.</td></tr>'}</table></div>`}
+function showConf(id){const c=S.conferencias.find(x=>x.id===id),t=confTot(c);
+  $('#dlg').innerHTML=`<h3 style="margin-top:0">Conferência — ${esc(c.tipo)}</h3><p class="mut">${esc(L(c.local_id))} · ${new Date(c.iniciada_em).toLocaleString('pt-BR')} · ${esc(c.usuario_email)}<br>${t.ok} conferidos · ${t.falt} faltantes · ${t.div} divergentes</p>
+  <div class="tw"><table><tr><th>Tombo</th><th>Descrição</th><th>Resultado</th><th>Hora</th></tr>${t.it.map(i=>{const b=S.bens.find(x=>x.id===i.bem_id)||{};return `<tr><td><b>${esc(b.tombo)}</b></td><td>${esc(b.descricao)}</td><td class="${i.resultado==='Faltante'?'err':i.resultado==='Presente'?'ok':'warn'}">${esc(i.resultado)}</td><td>${new Date(i.data).toLocaleTimeString('pt-BR')}</td></tr>`}).join('')}</table></div>
+  <div class="row" style="justify-content:flex-end;margin-top:10px"><button onclick="$('#dlg').close()">Fechar</button></div>`;if(!$('#dlg').open)$('#dlg').showModal()}
 
 /* ======== ETIQUETAS ======== */
 function labels(){
