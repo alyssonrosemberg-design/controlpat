@@ -69,6 +69,8 @@ const dt=v=>v?new Date(String(v).length===10?v+'T12:00:00':v).toLocaleDateString
 const today=()=>new Date().toISOString().slice(0,10);
 const inDays=n=>Math.ceil((new Date(String(n).slice(0,10)+'T12:00:00')-Date.now())/864e5);
 const ESTADOS=['Novo','Bom','Regular','Ruim','Inservível'],STATUS=['Ativo','Em manutenção','Emprestado','Baixado','Não localizado'],MOTIVOS=['Venda','Doação','Sucata','Perda/Furto','Outro'];
+let goConf=false;
+$('#dlg').addEventListener('close',async()=>{try{await reload()}catch(e){}if(!ME)return;if(goConf){goConf=false;view='conf';render()}else if(view==='conf')render()});
 window.addEventListener('error',e=>{alert('Erro: '+e.message)});
 window.addEventListener('unhandledrejection',e=>{alert('Erro: '+(e.reason?.message||e.reason));});
 
@@ -353,7 +355,7 @@ async function finalizarInv(){
   if(!sess.length&&!confirm('Nenhum bem foi conferido. Finalizar mesmo assim (todos ficarão como faltantes)?'))return;
   const mk=$('#mk').checked;if(!curConf)curConf=await Repo.rpc('iniciar_conferencia',{p_local:invLocal,p_tipo:'Inventário'});
   await Repo.rpc('finalizar_conferencia',{p_conf:curConf,p_marcar:mk});
-  const id=curConf;curConf=null;sess=[];await reload();$('#res').innerHTML='';invList();showConf(id)}
+  const id=curConf;curConf=null;sess=[];await reload();$('#res').innerHTML='';invList();goConf=true;showConf(id)}
 const confTot=c=>{const it=(S.conferencia_itens||[]).filter(i=>i.conferencia_id===c.id),n=r=>it.filter(i=>i.resultado===r).length;return{ok:it.length-n('Faltante'),falt:n('Faltante'),div:n('Local divergente')+n('Movido'),it}};
 function confs(){
   const r=[...(S.conferencias||[])].sort((a,b)=>a.iniciada_em<b.iniciada_em?1:-1);
