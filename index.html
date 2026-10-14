@@ -43,7 +43,10 @@ dialog::backdrop{background:#0008}
 .lbl .qr{width:96px;margin:0 auto 4px}.lbl b{display:block;font-size:12px}
 .foto{width:100%;max-height:220px;object-fit:cover;border-radius:10px;margin-bottom:10px}
 #login{max-width:360px;margin:12vh auto}
-#printarea{display:none}@media print{body>*:not(#printarea){display:none!important}#printarea{display:block}}
+#printarea{display:none}@media print{body>*:not(#printarea){display:none!important}#printarea{display:block;color:#000;background:#fff}@page{margin:14mm}}
+.rep{font:12px/1.4 Arial,sans-serif;color:#000}.rep h2{margin:0 0 2px;font-size:19px}.rep table{border-collapse:collapse;width:100%;margin-top:10px}
+.rep th,.rep td{border:1px solid #888;padding:4px 6px;text-align:left;white-space:normal;color:#000;font-size:12px}.rep th{background:#eee}
+.rep tr{page-break-inside:avoid}.sig{display:flex;gap:50px;margin-top:70px}.sig div{flex:1;border-top:1px solid #000;text-align:center;padding-top:4px}
 </style>
 </head>
 <body>
@@ -66,6 +69,7 @@ const dt=v=>v?new Date(String(v).length===10?v+'T12:00:00':v).toLocaleDateString
 const today=()=>new Date().toISOString().slice(0,10);
 const inDays=n=>Math.ceil((new Date(String(n).slice(0,10)+'T12:00:00')-Date.now())/864e5);
 const ESTADOS=['Novo','Bom','Regular','Ruim','Inservível'],STATUS=['Ativo','Em manutenção','Emprestado','Baixado','Não localizado'],MOTIVOS=['Venda','Doação','Sucata','Perda/Furto','Outro'];
+window.addEventListener('error',e=>{alert('Erro: '+e.message)});
 window.addEventListener('unhandledrejection',e=>{alert('Erro: '+(e.reason?.message||e.reason));});
 
 /* ======== CAMADA DE DADOS ======== */
@@ -78,8 +82,8 @@ const Repo={
 let S={},ME=null,view='dash',sc=null,sess=[],lastScan={c:'',t:0},modo='consulta',invLocal='',F={q:'',l:'',s:''};
 const adm=()=>ME?.papel==='admin';
 async function refresh(){
-  const T=['locais','bens','movimentacoes','manutencoes','baixas','conferencias','conferencia_itens'];if(adm())T.push('perfis');
-  const r=await Promise.all(T.map(t=>Repo.list(t).catch(e=>{if(t.startsWith('conferencia'))return [];throw e})));T.forEach((t,i)=>S[t]=r[i]);render()}
+  const T=['locais','bens','movimentacoes','manutencoes','baixas','conferencias','conferencia_itens','usuario_locais'];if(adm())T.push('perfis');
+  const r=await Promise.all(T.map(t=>Repo.list(t).catch(e=>{if(t.startsWith('conferencia')||t==='usuario_locais')return [];throw e})));T.forEach((t,i)=>S[t]=r[i]);render()}
 const L=id=>(S.locais.find(l=>l.id===id)||{}).nome||'— sem local —';
 const nextTombo=()=>'PAT-'+String(S.bens.reduce((m,b)=>Math.max(m,parseInt((b.tombo||'').replace(/\D/g,''))||0),0)+1).padStart(6,'0');
 const mov=(b,tipo,de,para,obs)=>Repo.upsert('movimentacoes',{bem_id:b.id,tipo,de_local_id:de||null,para_local_id:para||null,obs:obs||null});
@@ -135,7 +139,7 @@ function dash(){
   const gar=ativos.filter(b=>b.garantia_ate&&inDays(b.garantia_ate)<=30).sort((a,b)=>a.garantia_ate<b.garantia_ate?-1:1);
   const porL=S.locais.map(l=>({n:l.nome,c:ativos.filter(b=>b.local_id===l.id).length})),mx=Math.max(1,...porL.map(x=>x.c));
   const al=(d)=>{const n=inDays(d);return n<0?`<b class="err">vencido há ${-n}d</b>`:`<b class="warn">em ${n}d</b>`};
-  $('#main').innerHTML=`<div class="grid"><div class="card kpi"><b>${ativos.length}</b><span>Bens em uso (${S.bens.length-ativos.length} baixados)</span></div>
+  $('#main').innerHTML=`${adm()?'':`<div class="card"><b>Seus locais:</b> ${S.locais.map(l=>esc(l.nome)).join(', ')||'<span class="err">nenhum — peça ao administrador para vincular um local ao seu usuário.</span>'}</div>`}<div class="grid"><div class="card kpi"><b>${ativos.length}</b><span>Bens em uso (${S.bens.length-ativos.length} baixados)</span></div>
   <div class="card kpi"><b>${brl(vt)}</b><span>Valor contábil atual</span></div><div class="card kpi"><b>${brl(dep)}</b><span>Depreciação acumulada</span></div>
   <div class="card kpi"><b class="${ativos.some(b=>!b.verificado_em)?'warn':'ok'}">${ativos.filter(b=>!b.verificado_em).length}</b><span>Nunca conferidos</span></div></div>
   <div class="g2"><div class="card"><b>🔧 Manutenções (próx. 30 dias / vencidas)</b>${man.map(m=>{const b=S.bens.find(x=>x.id===m.bem_id)||{};return `<div style="margin-top:7px"><a href="#" onclick="showFicha('${b.id}');return false"><b>${esc(b.tombo)}</b></a> ${esc(m.tipo)} · ${dt(m.data)} ${al(m.data)}</div>`}).join('')||'<p class="mut">Nenhuma pendência.</p>'}</div>
@@ -159,7 +163,7 @@ function bens(){
 
 /* ---- Ficha do bem ---- */
 function showFicha(id){
-  const b=S.bens.find(x=>x.id===id),d=deprec(b),ms=S.manutencoes.filter(m=>m.bem_id===id).sort((a,c)=>a.data<c.data?1:-1),bx=S.baixas.find(x=>x.bem_id===id),hs=S.movs.filter(m=>m.bem_id===id).sort((a,c)=>a.data<c.data?1:-1).slice(0,5);
+  const b=S.bens.find(x=>x.id===id),d=deprec(b),ms=S.manutencoes.filter(m=>m.bem_id===id).sort((a,c)=>a.data<c.data?1:-1),bx=S.baixas.find(x=>x.bem_id===id),hs=(S.movimentacoes||[]).filter(m=>m.bem_id===id).sort((a,c)=>a.data<c.data?1:-1).slice(0,5);
   $('#dlg').innerHTML=`${b.foto_path?`<img class="foto" src="${esc(fotoUrl(b.foto_path))}" alt="">`:''}
   <div class="row" style="justify-content:space-between;flex-wrap:nowrap"><h3 style="margin:0">${esc(b.tombo)}</h3><span class="tag">${esc(b.status)}</span></div>
   <p style="margin:4px 0">${esc(b.descricao)}<br><span class="mut">${esc([b.categoria,b.marca,b.modelo,b.serie&&'S/N '+b.serie].filter(Boolean).join(' · '))}</span></p>
@@ -281,12 +285,27 @@ async function saveLocal(id){if(!adm())return;const n=$('#en').value.trim();if(!
   const l=S.locais.find(x=>x.id===id);await Repo.upsert('locais',{...l,nome:n,setor:$('#es').value.trim()||null});$('#dlg').close();await refresh()}
 async function delLocal(id){if(!adm())return;if(S.bens.some(b=>b.local_id===id))return alert('Há bens neste local. Transfira-os antes.');if(!confirm('Excluir este local?'))return;await Repo.remove('locais',id);await refresh()}
 function users(){
-  $('#main').innerHTML=`<div class="card tw"><table><tr><th>E-mail</th><th>Nome</th><th>Perfil</th><th>Ativo</th></tr>${S.perfis.map(p=>`<tr><td>${esc(p.email)}</td><td>${esc(p.nome)}</td>
-  <td><select onchange="setPerfil('${p.id}',{papel:this.value})"><option ${p.papel==='admin'?'selected':''}>admin</option><option ${p.papel==='conferente'?'selected':''}>conferente</option></select></td>
-  <td><input type="checkbox" style="width:auto" ${p.ativo?'checked':''} onchange="setPerfil('${p.id}',{ativo:this.checked})"></td></tr>`).join('')}</table></div>
-  <p class="mut">Novos usuários criam conta na tela de login e entram como <b>conferente</b>. Desative quem não deve mais acessar.</p>`}
-async function setPerfil(id,ch){const p=S.perfis.find(x=>x.id===id);if(id===ME.id&&(ch.papel==='conferente'||ch.ativo===false)&&!confirm('Você perderá seu acesso de administrador. Continuar?'))return users();
-  await Repo.upsert('perfis',{...p,...ch});await refresh()}
+  const nomes=id=>S.usuario_locais.filter(x=>x.usuario_id===id).map(x=>L(x.local_id));
+  $('#main').innerHTML=`<div class="card tw"><table><tr><th>E-mail</th><th>Nome</th><th>Perfil</th><th>Locais de acesso</th><th>Ativo</th><th></th></tr>${S.perfis.map(p=>`<tr><td>${esc(p.email)}</td><td>${esc(p.nome)}</td><td><span class="tag">${p.papel}</span></td>
+  <td style="white-space:normal">${p.papel==='admin'?'<span class="mut">Todos (administrador)</span>':esc(nomes(p.id).join(', '))||'<span class="err">Nenhum — sem acesso a bens</span>'}</td>
+  <td class="${p.ativo?'ok':'err'}">${p.ativo?'Sim':'Não'}</td><td><button class="sm" onclick="editUser('${p.id}')">Editar</button></td></tr>`).join('')}</table></div>
+  <p class="mut">Usuários comuns (conferente) só veem e conferem os bens dos locais marcados para eles. Administradores veem todos os locais.</p>`}
+function editUser(id){const p=S.perfis.find(x=>x.id===id),mine=S.usuario_locais.filter(x=>x.usuario_id===id).map(x=>x.local_id);
+  $('#dlg').innerHTML=`<h3 style="margin-top:0">Editar usuário</h3><p class="mut" style="margin:0 0 10px">${esc(p.email)}</p>
+  <div class="g2"><div><label>Nome</label><input id="un" value="${esc(p.nome)}"></div>
+  <div><label>Perfil</label><select id="up"><option ${p.papel==='admin'?'selected':''}>admin</option><option ${p.papel==='conferente'?'selected':''}>conferente</option></select></div></div>
+  <label style="margin-top:10px;display:flex;gap:6px;align-items:center;color:var(--tx);font-size:14px"><input type="checkbox" id="ua" style="width:auto" ${p.ativo?'checked':''}> Usuário ativo</label>
+  <div style="margin-top:12px"><label>Locais que este usuário pode acessar (um ou mais)</label>
+  <div id="ul" style="max-height:200px;overflow:auto;border:1px solid var(--bd);border-radius:8px;padding:6px 10px">${S.locais.map(l=>`<label style="display:flex;gap:8px;align-items:center;color:var(--tx);font-size:14px;margin:6px 0"><input type="checkbox" style="width:auto" value="${l.id}" ${mine.includes(l.id)?'checked':''}> ${esc(l.nome)}${l.setor?` <span class="mut">· ${esc(l.setor)}</span>`:''}</label>`).join('')||'<span class="mut">Cadastre locais primeiro.</span>'}</div>
+  <p class="mut" style="font-size:12.5px;margin:6px 0 0">Administradores enxergam todos os locais, independente desta seleção.</p></div>
+  <div class="row" style="justify-content:flex-end;margin-top:12px"><button onclick="$('#dlg').close()">Cancelar</button><button class="pri" onclick="saveUser('${id}')">Salvar</button></div>`;$('#dlg').showModal()}
+async function saveUser(id){if(!adm())return;const p=S.perfis.find(x=>x.id===id),papel=$('#up').value,ativo=$('#ua').checked,nome=$('#un').value.trim();
+  if(id===ME.id&&(papel!=='admin'||!ativo)&&!confirm('Você perderá seu acesso de administrador. Continuar?'))return;
+  const ls=[...document.querySelectorAll('#ul input:checked')].map(i=>i.value);
+  {const r=await sb.from('perfis').update({nome,papel,ativo}).eq('id',id);if(r.error)throw r.error}
+  const d=await sb.from('usuario_locais').delete().eq('usuario_id',id);if(d.error)throw d.error;
+  if(ls.length){const i=await sb.from('usuario_locais').insert(ls.map(l=>({usuario_id:id,local_id:l})));if(i.error)throw i.error}
+  $('#dlg').close();if(id===ME.id)return boot();await refresh()}
 
 /* ======== LEITOR / INVENTÁRIO ======== */
 function scan(){
@@ -303,14 +322,15 @@ async function startScan(){try{sc=new Html5Qrcode('reader');await sc.start({faci
 async function stopScan(){if(sc){try{await sc.stop();sc.clear()}catch(e){}sc=null}const a=$('#bs');if(a){a.style.display='';$('#bx').style.display='none'}}
 function onCode(code){code=(code||'').trim();if(!code)return;const n=Date.now();if(lastScan.c===code&&n-lastScan.t<3000)return;lastScan={c:code,t:n};
   const b=S.bens.find(x=>x.tombo.toLowerCase()===code.toLowerCase()||x.id===code);
-  if(!b){$('#res').innerHTML=`<div class="card"><b class="err">Código não encontrado:</b> ${esc(code)}</div>`;return}
+  if(!b){$('#res').innerHTML=`<div class="card"><b class="err">Código não encontrado:</b> ${esc(code)} <span class="mut">(inexistente ou fora dos seus locais)</span></div>`;return}
   const dif=modo==='inv'&&b.local_id!==invLocal;
   $('#res').innerHTML=`<div class="card"><div class="row" style="justify-content:space-between;flex-wrap:nowrap"><b style="font-size:17px">${esc(b.tombo)}</b><span class="tag">${esc(b.status)}</span></div>
   <p style="margin:6px 0">${esc(b.descricao)}<br><span class="mut">${esc([b.marca,b.modelo,b.serie&&'S/N '+b.serie].filter(Boolean).join(' · '))}</span></p>
   <p class="mut" style="margin:4px 0">Local: <b>${esc(L(b.local_id))}</b> · Resp.: ${esc(b.responsavel||'—')}<br>Última conferência: ${dt(b.verificado_em)}</p>${dif?'<p class="warn">⚠ Cadastrado em outro local.</p>':''}
-  <div class="row" style="margin-top:8px">${modo==='inv'?`<button class="pri" onclick="conf('${b.id}',false)">✔ Confirmar presença</button>${dif?`<button onclick="conf('${b.id}',true)">Mover para ${esc(L(invLocal))}</button>`:''}`:`<button onclick="showFicha('${b.id}')">Abrir ficha</button><button onclick="conf('${b.id}',false)">Registrar conferência</button>`}</div></div>`}
+  <div class="row" style="margin-top:8px">${modo==='inv'?`<button class="pri" onclick="conf('${b.id}',false)">✔ Confirmar presença</button>${dif?`<button onclick="conf('${b.id}',true)">Mover para ${esc(L(invLocal))}</button>`:''}`:`<button onclick="showFicha('${b.id}')">Abrir ficha</button><button onclick="conf('${b.id}',false)">Registrar conferência</button>`}<button onclick="cancelarBusca()">Cancelar</button></div></div>`}
+function cancelarBusca(){$('#res').innerHTML='';const m=$('#man');if(m)m.value='';lastScan={c:'',t:0}}
 let curConf=null;
-async function reload(){const[b,m,c,i]=await Promise.all([Repo.list('bens'),Repo.list('movimentacoes'),Repo.list('conferencias').catch(()=>S.conferencias||[]),Repo.list('conferencia_itens').catch(()=>S.conferencia_itens||[])]);S.bens=b;S.movs=m;S.conferencias=c;S.conferencia_itens=i}
+async function reload(){const[b,m,c,i]=await Promise.all([Repo.list('bens'),Repo.list('movimentacoes'),Repo.list('conferencias').catch(()=>S.conferencias||[]),Repo.list('conferencia_itens').catch(()=>S.conferencia_itens||[])]);S.bens=b;S.movimentacoes=m;S.conferencias=c;S.conferencia_itens=i}
 async function conf(id,move){
   const b0=S.bens.find(x=>x.id===id);
   try{
@@ -338,11 +358,35 @@ const confTot=c=>{const it=(S.conferencia_itens||[]).filter(i=>i.conferencia_id=
 function confs(){
   const r=[...(S.conferencias||[])].sort((a,b)=>a.iniciada_em<b.iniciada_em?1:-1);
   $('#main').innerHTML=`<div class="card tw"><table><tr><th>Data</th><th>Tipo</th><th>Local</th><th>Responsável</th><th>Conferidos</th><th>Faltantes</th><th>Divergentes</th><th></th></tr>
-  ${r.map(c=>{const t=confTot(c);return `<tr><td>${new Date(c.iniciada_em).toLocaleString('pt-BR')}${c.finalizada_em?'':' <span class="tag warn">em andamento</span>'}</td><td>${esc(c.tipo)}</td><td>${esc(L(c.local_id))}</td><td>${esc(c.usuario_email)}</td><td>${t.ok}</td><td class="${t.falt?'warn':''}">${t.falt}</td><td>${t.div}</td><td><button class="sm" onclick="showConf('${c.id}')">Detalhes</button></td></tr>`}).join('')||'<tr><td colspan="8" class="mut">Nenhuma conferência registrada.</td></tr>'}</table></div>`}
+  ${r.map(c=>{const t=confTot(c);return `<tr><td>${new Date(c.iniciada_em).toLocaleString('pt-BR')}${c.finalizada_em?'':' <span class="tag warn">em andamento</span>'}</td><td>${esc(c.tipo)}</td><td>${esc(L(c.local_id))}</td><td>${esc(c.usuario_email)}</td><td>${t.ok}</td><td class="${t.falt?'warn':''}">${t.falt}</td><td>${t.div}</td><td><button class="sm" onclick="showConf('${c.id}')">Detalhes</button> <button class="sm" onclick="imprimirConf('${c.id}')">Imprimir</button>${adm()?` <button class="sm bad" onclick="delConf('${c.id}')">Excluir</button>`:''}</td></tr>`}).join('')||'<tr><td colspan="8" class="mut">Nenhuma conferência registrada.</td></tr>'}</table></div>`}
+function imprimirConf(id){
+  const c=S.conferencias.find(x=>x.id===id),t=confTot(c),fmt=v=>v?new Date(v).toLocaleString('pt-BR'):'—';
+  const bem=i=>S.bens.find(x=>x.id===i.bem_id)||{};
+  const rows=[...t.it].sort((a,b)=>String(bem(a).tombo||'').localeCompare(String(bem(b).tombo||''),'pt-BR',{numeric:true}));
+  $('#printarea').innerHTML=`<div class="rep"><h2>Conferência — ${esc(c.tipo)}</h2><div style="color:#444">Controle de Patrimônio</div>
+  <table><tr><th style="width:22%">Local</th><td>${esc(L(c.local_id))}</td><th style="width:18%">Responsável</th><td>${esc(c.usuario_email||'—')}</td></tr>
+  <tr><th>Início</th><td>${fmt(c.iniciada_em)}</td><th>Término</th><td>${c.finalizada_em?fmt(c.finalizada_em):'Em andamento'}</td></tr>
+  <tr><th>Bens esperados</th><td>${c.total_esperado||0}</td><th>Conferidos</th><td>${t.ok}</td></tr>
+  <tr><th>Faltantes</th><td>${t.falt}</td><th>Divergentes / movidos</th><td>${t.div}</td></tr></table>
+  <table><tr><th style="width:5%">Nº</th><th>Tombo</th><th>Descrição</th><th>Resultado</th><th>Observação</th><th>Hora</th></tr>
+  ${rows.map((i,n)=>`<tr><td>${n+1}</td><td><b>${esc(bem(i).tombo)}</b></td><td>${esc(bem(i).descricao)}</td><td>${esc(i.resultado)}</td><td>${esc(i.obs)}</td><td>${new Date(i.data).toLocaleTimeString('pt-BR')}</td></tr>`).join('')||'<tr><td colspan="6">Sem itens.</td></tr>'}</table>
+  <div class="sig"><div>Responsável pela conferência</div><div>Responsável pelo local</div></div>
+  <div style="margin-top:14px;font-size:10px;color:#555">Emitido em ${new Date().toLocaleString('pt-BR')}</div></div>`;
+  setTimeout(()=>window.print(),150)}
+const RES=['Presente','Local divergente','Movido','Faltante'];
 function showConf(id){const c=S.conferencias.find(x=>x.id===id),t=confTot(c);
   $('#dlg').innerHTML=`<h3 style="margin-top:0">Conferência — ${esc(c.tipo)}</h3><p class="mut">${esc(L(c.local_id))} · ${new Date(c.iniciada_em).toLocaleString('pt-BR')} · ${esc(c.usuario_email)}<br>${t.ok} conferidos · ${t.falt} faltantes · ${t.div} divergentes</p>
-  <div class="tw"><table><tr><th>Tombo</th><th>Descrição</th><th>Resultado</th><th>Hora</th></tr>${t.it.map(i=>{const b=S.bens.find(x=>x.id===i.bem_id)||{};return `<tr><td><b>${esc(b.tombo)}</b></td><td>${esc(b.descricao)}</td><td class="${i.resultado==='Faltante'?'err':i.resultado==='Presente'?'ok':'warn'}">${esc(i.resultado)}</td><td>${new Date(i.data).toLocaleTimeString('pt-BR')}</td></tr>`}).join('')}</table></div>
-  <div class="row" style="justify-content:flex-end;margin-top:10px"><button onclick="$('#dlg').close()">Fechar</button></div>`;if(!$('#dlg').open)$('#dlg').showModal()}
+  <div class="tw"><table><tr><th>Tombo</th><th>Descrição</th><th>Resultado</th><th>Obs.</th><th>Hora</th>${adm()?'<th></th>':''}</tr>${t.it.map(i=>{const b=S.bens.find(x=>x.id===i.bem_id)||{};return `<tr><td><b>${esc(b.tombo)}</b></td><td>${esc(b.descricao)}</td><td class="${i.resultado==='Faltante'?'err':i.resultado==='Presente'?'ok':'warn'}">${esc(i.resultado)}</td><td>${esc(i.obs)}</td><td>${new Date(i.data).toLocaleTimeString('pt-BR')}</td>${adm()?`<td><button class="sm" onclick="editItem('${id}','${i.id}')">Editar</button> <button class="sm bad" onclick="delItem('${id}','${i.id}')">Excluir</button></td>`:''}</tr>`}).join('')||'<tr><td colspan="6" class="mut">Sem itens.</td></tr>'}</table></div>
+  <div class="row" style="justify-content:flex-end;margin-top:10px">${adm()?`<button class="bad" onclick="delConf('${id}')">Excluir conferência</button>`:''}<button class="pri" onclick="imprimirConf('${id}')">🖨 Imprimir / PDF</button><button onclick="$('#dlg').close()">Fechar</button></div>`;if(!$('#dlg').open)$('#dlg').showModal()}
+function editItem(cid,iid){if(!adm())return;const i=S.conferencia_itens.find(x=>x.id===iid),b=S.bens.find(x=>x.id===i.bem_id)||{};
+  $('#dlg').innerHTML=`<h3 style="margin-top:0">Editar item — ${esc(b.tombo)}</h3><p class="mut">${esc(b.descricao)}</p>
+  <div class="g2"><div><label>Resultado</label><select id="ir">${RES.map(r=>`<option ${i.resultado===r?'selected':''}>${r}</option>`).join('')}</select></div><div><label>Observação</label><input id="io" value="${esc(i.obs)}"></div></div>
+  <p class="mut" style="font-size:12.5px">Altera apenas o registro desta conferência, não os dados do bem.</p>
+  <div class="row" style="justify-content:flex-end"><button onclick="showConf('${cid}')">Voltar</button><button class="pri" onclick="saveItem('${cid}','${iid}')">Salvar</button></div>`}
+async function saveItem(cid,iid){const i=S.conferencia_itens.find(x=>x.id===iid);await Repo.upsert('conferencia_itens',{...i,resultado:$('#ir').value,obs:$('#io').value.trim()||null});await reload();showConf(cid)}
+async function delItem(cid,iid){if(!confirm('Excluir este item da conferência?'))return;await Repo.remove('conferencia_itens',iid);await reload();showConf(cid)}
+async function delConf(id){if(!confirm('Excluir esta conferência e todos os seus itens? As datas de última conferência dos bens não serão alteradas.'))return;
+  await Repo.remove('conferencias',id);await reload();$('#dlg').close();render()}
 
 /* ======== ETIQUETAS ======== */
 function labels(){
