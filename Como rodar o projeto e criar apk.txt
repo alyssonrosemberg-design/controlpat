@@ -1,0 +1,8 @@
+Vá para pasta do projeto:
+
+C:\Users\alysson.schayder\Documents\Controle de Patrimônio\android-app
+
+Rode node "setup.js". Ele instala as dependências, cria o projeto Android e ativa a câmera e a impressão.
+Para abrir no Android Studio e rodar no celular conectado, use "npx cap open android"
+
+O arquivo sai em android/app/build/outputs/apk/debug/app-debug.apk
