@@ -4,11 +4,20 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Controle de Patrimônio</title>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<!-- Bibliotecas locais em vendor/ para funcionamento 100% offline no APK -->
+<script src="vendor/supabase.js"></script>
+<script src="vendor/qrcode.min.js"></script>
+<script src="vendor/html5-qrcode.min.js"></script>
+<script src="vendor/xlsx.full.min.js"></script>
+<script src="vendor/jspdf.umd.min.js"></script>
+<!-- Fallback CDN para ambiente web caso a pasta vendor não esteja presente -->
+<script>
+if(typeof supabase==='undefined')document.write('<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"><\/script>');
+if(typeof qrcode==='undefined')document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"><\/script>');
+if(typeof Html5Qrcode==='undefined')document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"><\/script>');
+if(typeof XLSX==='undefined')document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"><\/script>');
+if(typeof jspdf==='undefined')document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"><\/script>');
+</script>
 <style>
 :root{--bg:#f5f6f8;--card:#fff;--tx:#1b2330;--mut:#6b7686;--bd:#e1e5ec;--pri:#1f6feb;--ok:#1a7f4b;--warn:#b7791f;--bad:#c93636}
 @media (prefers-color-scheme:dark){:root{--bg:#10141b;--card:#181e28;--tx:#e6eaf1;--mut:#8b96a8;--bd:#283040;--pri:#4c8dff;--ok:#3ecf8e;--warn:#e0a84a;--bad:#ff6b6b}}
@@ -53,19 +62,212 @@ dialog::backdrop{background:#0008}
 </head>
 <body>
 <div id="app"><p style="padding:24px;font:16px system-ui,sans-serif">Carregando o sistema…</p></div>
-<script>window.addEventListener("error",function(e){var a=document.getElementById("app");if(a&&!window.__iniciou)a.innerHTML='<div style="padding:22px;font:15px system-ui,sans-serif;color:#e04b4b"><b>Erro ao iniciar o sistema:</b><br>'+(e.message||"desconhecido")+'<br><br>Verifique a internet e abra o app novamente.</div>'});</script>
+<script>window.addEventListener("error",function(e){var a=document.getElementById("app");if(a&&!window.__iniciou)a.innerHTML='<div style="padding:22px;font:15px system-ui,sans-serif;color:#e04b4b"><b>Erro ao iniciar o sistema:</b><br>'+(e.message||"desconhecido")+'<br><br><button onclick="location.reload()">Tentar novamente</button></div>'});</script>
 <dialog id="dlg"></dialog>
 <dialog id="zoom"></dialog>
 <div id="printarea"></div>
 
 <script>
-if(typeof supabase==='undefined'||typeof qrcode==='undefined'){document.getElementById('app').innerHTML='<div style="padding:22px;font:15px system-ui,sans-serif;color:#e04b4b"><b>Sem conexão com a internet.</b><br>Não foi possível carregar as bibliotecas do sistema. Conecte-se e abra o app novamente.</div>';throw new Error('bibliotecas não carregadas')}
+if(typeof supabase==='undefined'||typeof qrcode==='undefined'){
+  document.getElementById('app').innerHTML='<div style="padding:22px;font:15px system-ui,sans-serif;color:#e04b4b"><b>Bibliotecas locais não encontradas.</b><br>Verifique os arquivos do aplicativo e tente novamente.</div>';
+  throw new Error('bibliotecas não carregadas');
+}
 window.__iniciou=true;
-/* ======== CONFIGURAÇÃO SUPABASE (a chave publishable é pública; NUNCA coloque a senha do banco aqui) ======== */
+
+/* ======== CONFIGURAÇÃO SUPABASE ======== */
 const SUPABASE_URL='https://qprpkrvcczxwtroztbbp.supabase.co';
 const SUPABASE_KEY='sb_publishable_qjmUWIbCrjeA6Z2M9I5-Cg_j_W8QJUT';
 const sb=supabase.createClient(SUPABASE_URL,SUPABASE_KEY);
 const BUCKET='bens-fotos';
+
+/* ======== MÓDULO OFFLINE E CACHE ======== */
+const STORAGE={
+  CACHE:'pat_cache_dados_v2',
+  OFFLINE_CONFS:'pat_offline_conferencias_v2',
+  OFFLINE_USERS:'pat_offline_usuarios_v2',
+  ACTIVE_USER:'pat_usuario_ativo_v2',
+  LAST_EMAIL:'pat_ultimo_email_v2'
+};
+
+let isAppOnline=navigator.onLine,isSyncing=false;
+
+async function hashCred(email,pass){
+  try{
+    const s=(email||'').toLowerCase().trim()+'::'+String(pass||'');
+    const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(s));
+    return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+  }catch(e){
+    let h=0,s=(email||'').toLowerCase().trim()+'::'+String(pass||'');
+    for(let i=0;i<s.length;i++)h=(Math.imul(31,h)+s.charCodeAt(i))|0;
+    return 'h_'+Math.abs(h);
+  }
+}
+
+function getOfflineUsers(){
+  try{const raw=localStorage.getItem(STORAGE.OFFLINE_USERS);return raw?JSON.parse(raw):{}}catch(e){return{}}
+}
+function saveOfflineUser(email,hash,profile){
+  try{
+    const users=getOfflineUsers();
+    users[email.toLowerCase().trim()]={
+      email:email.toLowerCase().trim(),
+      hash,
+      profile,
+      salvoEm:new Date().toISOString()
+    };
+    localStorage.setItem(STORAGE.OFFLINE_USERS,JSON.stringify(users));
+  }catch(e){}
+}
+
+function getActiveProfile(){
+  try{const raw=localStorage.getItem(STORAGE.ACTIVE_USER);return raw?JSON.parse(raw):null}catch(e){return null}
+}
+function setActiveProfile(p){
+  try{
+    if(p)localStorage.setItem(STORAGE.ACTIVE_USER,JSON.stringify(p));
+    else localStorage.removeItem(STORAGE.ACTIVE_USER);
+  }catch(e){}
+}
+
+function getCacheData(){
+  try{const raw=localStorage.getItem(STORAGE.CACHE);return raw?JSON.parse(raw):null}catch(e){return null}
+}
+function saveCacheData(state){
+  try{
+    const toSave={
+      locais:state.locais||[],
+      bens:state.bens||[],
+      movimentacoes:state.movimentacoes||[],
+      manutencoes:state.manutencoes||[],
+      baixas:state.baixas||[],
+      conferencias:(state.conferencias||[]).filter(c=>!c.is_offline),
+      conferencia_itens:(state.conferencia_itens||[]).filter(i=>!i.is_offline),
+      usuario_locais:state.usuario_locais||[],
+      gerencias:state.gerencias||[],
+      equipamentos:state.equipamentos||[],
+      categorias:state.categorias||[],
+      perfis:state.perfis||[],
+      semEstrutura:state.semEstrutura,
+      atualizadoEm:new Date().toISOString()
+    };
+    localStorage.setItem(STORAGE.CACHE,JSON.stringify(toSave));
+  }catch(e){console.warn('Erro ao salvar cache:',e)}
+}
+
+function getOfflineConferences(){
+  try{const raw=localStorage.getItem(STORAGE.OFFLINE_CONFS);return raw?JSON.parse(raw):[]}catch(e){return[]}
+}
+function saveOfflineConferencesList(list){
+  try{localStorage.setItem(STORAGE.OFFLINE_CONFS,JSON.stringify(list))}catch(e){}
+}
+function saveOfflineConference(conf){
+  const list=getOfflineConferences();
+  const idx=list.findIndex(c=>c.id===conf.id);
+  if(idx>=0)list[idx]=conf;else list.unshift(conf);
+  saveOfflineConferencesList(list);
+}
+function removeOfflineConference(id){
+  const list=getOfflineConferences().filter(c=>c.id!==id);
+  saveOfflineConferencesList(list);
+}
+
+function isNetworkError(e){
+  if(!navigator.onLine)return true;
+  const m=String(e?.message||e||'').toLowerCase();
+  return m.includes('failed to fetch')||m.includes('network')||m.includes('networkerror')||m.includes('timeout')||m.includes('offline')||m.includes('abort');
+}
+
+async function checkRealConnection(){
+  if(!navigator.onLine){
+    isAppOnline=false;
+    updateOnlineBadge();
+    return false;
+  }
+  try{
+    const ctrl=new AbortController();
+    const tid=setTimeout(()=>ctrl.abort(),2500);
+    const res=await fetch(`${SUPABASE_URL}/auth/v1/health`,{method:'HEAD',signal:ctrl.signal}).catch(()=>null);
+    clearTimeout(tid);
+    isAppOnline=!!(res&&(res.status>=200&&res.status<500));
+  }catch(e){
+    isAppOnline=false;
+  }
+  updateOnlineBadge();
+  return isAppOnline;
+}
+
+window.addEventListener('online',async()=>{
+  await checkRealConnection();
+  if(isAppOnline)autoSyncIfOnline();
+});
+window.addEventListener('offline',()=>{
+  isAppOnline=false;
+  updateOnlineBadge();
+});
+setInterval(()=>{if(navigator.onLine&&!isAppOnline)checkRealConnection()},20000);
+
+function updateOnlineBadge(){
+  const el=$('#netBadge'),bar=$('#syncBar');
+  const offCount=getOfflineConferences().length;
+  if(el){
+    if(isAppOnline){
+      el.className='tag ok';el.style.fontSize='11px';el.innerHTML='● Conectado';
+    }else{
+      el.className='tag err';el.style.fontSize='11px';el.innerHTML='● Offline';
+    }
+  }
+  if(bar){
+    if(offCount>0){
+      bar.style.display='block';
+      bar.innerHTML=`<div class="card warn" style="padding:8px 12px;margin:0 0 10px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+        <span>⚠ <b>${offCount} conferência(s) realizada(s) offline</b> pendente(s) de envio.</span>
+        <button class="pri sm" ${isSyncing?'disabled':''} onclick="syncOfflineConferences()">${isSyncing?'Sincronizando…':'⬆ Sincronizar com o banco'}</button>
+      </div>`;
+    }else if(!isAppOnline){
+      bar.style.display='block';
+      bar.innerHTML=`<div class="card" style="padding:6px 12px;margin:0 0 10px;background:var(--bg);font-size:12.5px;color:var(--mut)">
+        📡 <b>Modo Offline ativo.</b> Você pode realizar inventários e conferir bens normalmente. Tudo ficará gravado no aparelho.
+      </div>`;
+    }else{
+      bar.style.display='none';
+      bar.innerHTML='';
+    }
+  }
+}
+
+function mergeOfflineConferencesIntoState(){
+  const offList=getOfflineConferences();
+  if(!S.conferencias)S.conferencias=[];
+  if(!S.conferencia_itens)S.conferencia_itens=[];
+  S.conferencias=S.conferencias.filter(c=>!c.is_offline);
+  S.conferencia_itens=S.conferencia_itens.filter(i=>!i.is_offline);
+
+  offList.forEach(c=>{
+    S.conferencias.unshift({
+      id:c.id,
+      local_id:c.local_id,
+      tipo:c.tipo||'Inventário',
+      usuario_email:c.usuario_email,
+      iniciada_em:c.iniciada_em,
+      finalizada_em:c.finalizada_em,
+      total_esperado:c.total_esperado,
+      marcar_faltantes:c.marcar_faltantes,
+      is_offline:true
+    });
+    (c.itens||[]).forEach(it=>{
+      S.conferencia_itens.push({
+        id:it.id,
+        conferencia_id:c.id,
+        bem_id:it.bem_id,
+        resultado:it.resultado,
+        local_encontrado_id:it.local_encontrado_id,
+        data:it.data,
+        is_offline:true,
+        mover:it.mover
+      });
+    });
+  });
+}
 
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -94,21 +296,104 @@ function bip(ok=true){
       o.connect(g);g.connect(AC.destination);o.start(t0+d);o.stop(t0+d+l+.02)})}catch(e){}}
 let goConf=false;
 $('#dlg').addEventListener('close',async()=>{try{await reload()}catch(e){}if(!ME)return;if(goConf){goConf=false;view='conf';render()}else if(view==='conf')render()});
-window.addEventListener('error',e=>{alert('Erro: '+e.message)});
-window.addEventListener('unhandledrejection',e=>{alert('Erro: '+(e.reason?.message||e.reason));});
+window.addEventListener('error',e=>{if(isNetworkError(e))return;console.error(e)});
+window.addEventListener('unhandledrejection',e=>{if(isNetworkError(e.reason))return;console.error(e.reason)});
 
 /* ======== CAMADA DE DADOS ======== */
 const Repo={
-  async list(t){const{data,error}=await sb.from(t).select('*');if(error)throw error;return data},
-  async upsert(t,r,oc){const{data,error}=await sb.from(t).upsert(r,oc?{onConflict:oc}:{}).select();if(error)throw error;return data},
-  async remove(t,id){const{error}=await sb.from(t).delete().eq('id',id);if(error)throw error},
-  async rpc(f,a){const{data,error}=await sb.rpc(f,a);if(error)throw error;return data}
+  async list(t){
+    if(!isAppOnline){
+      const cached=getCacheData();
+      return (cached&&cached[t])?cached[t]:[];
+    }
+    const{data,error}=await sb.from(t).select('*');
+    if(error)throw error;
+    return data;
+  },
+  async upsert(t,r,oc){
+    if(!isAppOnline)throw new Error('Operação indisponível no Modo Offline. Conecte-se à internet para salvar cadastros.');
+    const{data,error}=await sb.from(t).upsert(r,oc?{onConflict:oc}:{}).select();
+    if(error)throw error;
+    return data;
+  },
+  async remove(t,id){
+    if(!isAppOnline)throw new Error('Operação indisponível no Modo Offline. Conecte-se à internet para excluir registros.');
+    const{error}=await sb.from(t).delete().eq('id',id);
+    if(error)throw error;
+  },
+  async rpc(f,a){
+    if(!isAppOnline)throw new Error('Sem conexão com a internet para executar '+f);
+    const{data,error}=await sb.rpc(f,a);
+    if(error)throw error;
+    return data;
+  }
 };
-let S={},ME=null,view='dash',sc=null,sess=[],lastScan={c:'',t:0},modo='consulta',invLocal='',F={q:'',l:'',s:'',g:'',e:''};
+let S={},ME=null,view='dash',dashSec='',sc=null,sess=[],lastScan={c:'',t:0},modo='consulta',invLocal='',F={q:'',l:'',s:'',g:'',e:'',c:''};
+let pageBens=1,perBens=10,pageConf=1,perConf=10,pageLabels=1,perLabels=10,pageMov=1,perMov=10,pageGar=1,perGar=10,pageConfItens=1,perConfItens=10;
+let FG={q:'',l:'',sit:'',qtd:30,unidade:'dias'};
+const diasCfg=()=>FG.unidade==='meses'?Math.round((+FG.qtd||1)*30.4375):(+FG.qtd||30);
+const userLocais=()=>{
+  const mine=(S.usuario_locais||[]).filter(x=>x.usuario_id===ME?.id).map(x=>x.local_id);
+  if(mine.length)return S.locais.filter(l=>mine.includes(l.id));
+  return adm()?S.locais:[];
+};
+function paginacao(total,page,perPage,fnName){
+  if(total<=0)return '';
+  const totalPages=Math.max(1,Math.ceil(total/perPage)),cur=Math.min(Math.max(1,page),totalPages);
+  const start=(cur-1)*perPage+1,end=Math.min(cur*perPage,total),opts=[10,15,30,50];
+  return `<div class="row" style="justify-content:space-between;align-items:center;margin-top:12px;padding-top:8px;border-top:1px solid var(--bd);font-size:13px">
+    <div style="flex:0 0 auto;display:flex;align-items:center;gap:6px">
+      <span class="mut">Exibir:</span>
+      <select style="width:auto;padding:3px 8px;font-size:13px" onchange="${fnName}Per(+this.value)">
+        ${opts.map(o=>`<option value="${o}" ${o===perPage?'selected':''}>${o} por página</option>`).join('')}
+      </select>
+      <span class="mut">· ${start}–${end} de ${total}</span>
+    </div>
+    <div style="flex:0 0 auto;display:flex;align-items:center;gap:4px">
+      <button class="sm" ${cur<=1?'disabled style="opacity:0.4;cursor:default"':''} onclick="${fnName}Page(1)" title="Primeira">«</button>
+      <button class="sm" ${cur<=1?'disabled style="opacity:0.4;cursor:default"':''} onclick="${fnName}Page(${cur-1})">‹ Anterior</button>
+      <span style="padding:0 6px">Pág. <b>${cur}</b> de <b>${totalPages}</b></span>
+      <button class="sm" ${cur>=totalPages?'disabled style="opacity:0.4;cursor:default"':''} onclick="${fnName}Page(${cur+1})">Próxima ›</button>
+      <button class="sm" ${cur>=totalPages?'disabled style="opacity:0.4;cursor:default"':''} onclick="${fnName}Page(${totalPages})" title="Última">»</button>
+    </div>
+  </div>`;
+}
+window.bensPage=p=>{pageBens=p;bens()};window.bensPer=n=>{perBens=n;pageBens=1;bens()};
+window.confPage=p=>{pageConf=p;confs()};window.confPer=n=>{perConf=n;pageConf=1;confs()};
+window.labelsPage=p=>{pageLabels=p;labels()};window.labelsPer=n=>{perLabels=n;pageLabels=1;labels()};
+window.movPage=p=>{pageMov=p;hist()};window.movPer=n=>{perMov=n;pageMov=1;hist()};
+window.garPage=p=>{pageGar=p;garantias()};window.garPer=n=>{perGar=n;pageGar=1;garantias()};
+window.confItensPage=p=>{pageConfItens=p;showConf(curConfId)};window.confItensPer=n=>{perConfItens=n;pageConfItens=1;showConf(curConfId)};
+window.toggleSelLabels=v=>{document.querySelectorAll('#lb input[type=checkbox]').forEach(i=>i.checked=v)};
 const adm=()=>ME?.papel==='admin';
 async function refresh(){
-  const T=['locais','bens','movimentacoes','manutencoes','baixas','conferencias','conferencia_itens','usuario_locais','gerencias','equipamentos'];S.semEstrutura=false;if(adm())T.push('perfis');
-  const r=await Promise.all(T.map(t=>Repo.list(t).catch(e=>{if(t.startsWith('conferencia')||t==='usuario_locais')return [];if(t==='gerencias'||t==='equipamentos'){S.semEstrutura=true;return []}throw e})));T.forEach((t,i)=>S[t]=r[i]);render()}
+  const T=['locais','bens','movimentacoes','manutencoes','baixas','conferencias','conferencia_itens','usuario_locais','gerencias','equipamentos','categorias'];
+  S.semEstrutura=false;if(adm())T.push('perfis');
+  let onlineLoaded=false;
+  if(isAppOnline){
+    try{
+      const r=await Promise.all(T.map(t=>Repo.list(t).catch(e=>{if(t.startsWith('conferencia')||t==='usuario_locais'||t==='categorias')return [];if(t==='gerencias'||t==='equipamentos'){S.semEstrutura=true;return []}throw e})));
+      T.forEach((t,i)=>S[t]=r[i]);
+      onlineLoaded=true;
+      saveCacheData(S);
+    }catch(e){
+      console.warn('Falha no carregamento online, recorrendo ao cache local:',e);
+      onlineLoaded=false;isAppOnline=false;
+    }
+  }
+  if(!onlineLoaded){
+    const cached=getCacheData();
+    if(cached){
+      T.forEach(t=>{S[t]=cached[t]||S[t]||[]});
+      S.semEstrutura=!!cached.semEstrutura;
+    }else{
+      T.forEach(t=>{S[t]=S[t]||[]});
+    }
+  }
+  mergeOfflineConferencesIntoState();
+  updateOnlineBadge();
+  render();
+}
 const L=id=>(S.locais.find(l=>l.id===id)||{}).nome||'— sem local —';
 const GN=id=>((S.gerencias||[]).find(x=>x.id===id)||{}).nome,EN=id=>((S.equipamentos||[]).find(x=>x.id===id)||{}).nome;
 const P=(s,g,e)=>[s?L(s):'— sem secretaria —',g&&GN(g),e&&EN(e)].filter(Boolean).join(' › ');
@@ -138,35 +423,192 @@ function deprec(b){const v=+b.valor||0,r=+b.valor_residual||0,n=+b.vida_util_ano
   const anos=Math.max(0,(Date.now()-new Date(b.data_aquisicao))/3.15576e10),acum=Math.min(v-r,(v-r)/n*anos);return{atual:v-acum,acum}}
 
 /* ======== AUTH ======== */
+/* ======== AUTH & SESSÃO (ONLINE E OFFLINE) ======== */
 async function boot(){
-  const{data:{session}}=await sb.auth.getSession();
-  if(!session){ME=null;return loginView()}
-  const getP=()=>sb.from('perfis').select('*').eq('id',session.user.id).maybeSingle();
-  let{data,error}=await getP();
-  if(!data){await sb.rpc('garantir_perfil');({data,error}=await getP())}
-  if(!data||!data.ativo){const why=error?'Erro do banco: '+error.message:(data?'Sua conta está desativada.':'Perfil não encontrado para '+session.user.email+'.');
-    $('#app').innerHTML=`<div class="card" id="login"><p>Seu acesso ainda não foi liberado por um administrador.</p><p class="err" style="font-size:13px">${esc(why)}</p><button onclick="sb.auth.signOut()">Sair</button></div>`;return}
-  ME=data;shell();await refresh()}
+  await checkRealConnection();
+  if(isAppOnline){
+    try{
+      const getSessionPromise=sb.auth.getSession();
+      const timeoutPromise=new Promise((_,reject)=>setTimeout(()=>reject(new Error('timeout')),3000));
+      const{data:{session}}=await Promise.race([getSessionPromise,timeoutPromise]);
+      if(session){
+        const getP=()=>sb.from('perfis').select('*').eq('id',session.user.id).maybeSingle();
+        let{data,error}=await getP();
+        if(!data){await sb.rpc('garantir_perfil');({data,error}=await getP())}
+        if(!data||!data.ativo){
+          const why=error?'Erro do banco: '+error.message:(data?'Sua conta está desativada.':'Perfil não encontrado para '+session.user.email+'.');
+          $('#app').innerHTML=`<div class="card" id="login"><p>Seu acesso ainda não foi liberado por um administrador.</p><p class="err" style="font-size:13px">${esc(why)}</p><button onclick="sair()">Sair</button></div>`;
+          return;
+        }
+        ME=data;
+        setActiveProfile(ME);
+        shell();
+        await refresh();
+        autoSyncIfOnline();
+        return;
+      }
+    }catch(e){
+      console.warn('Erro ou timeout ao obter sessão online:',e);
+      isAppOnline=false;
+    }
+  }
+
+  // Se estiver offline ou sem sessão online ativa, verifica se já existe perfil ativo salvo
+  const activeMe=getActiveProfile();
+  if(activeMe){
+    ME=activeMe;
+    shell();
+    await refresh();
+    return;
+  }
+
+  ME=null;
+  loginView();
+}
+
 function loginView(msg=''){
-  $('#app').innerHTML=`<div class="card" id="login"><h1>📦 Controle de Patrimônio</h1><p class="mut">Entre com sua conta.</p>
-  <label>E-mail</label><input id="em" type="email"><label style="margin-top:8px">Senha</label><input id="pw" type="password">
-  <p class="${msg.startsWith('✔')?'ok':'err'}">${esc(msg)}</p>
-  <div class="row"><button class="pri" id="bi">Entrar</button><button id="bc">Criar conta</button></div></div>`;
+  const savedUsers=getOfflineUsers();
+  const savedEmails=Object.keys(savedUsers);
+  let lastEm='';
+  try{lastEm=localStorage.getItem(STORAGE.LAST_EMAIL)||(savedEmails[0]||'')}catch(e){}
+  const off=!isAppOnline;
+
+  $('#app').innerHTML=`<div class="card" id="login">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <h1 style="margin:0">📦 Patrimônio</h1>
+      <span class="tag ${off?'err':'ok'}" style="font-size:11px">${off?'Modo Offline':'Conectado'}</span>
+    </div>
+    <p class="mut" style="margin:4px 0 12px">Entre com sua conta.</p>
+    
+    <label>E-mail</label>
+    <input id="em" type="email" value="${esc(lastEm)}" autocomplete="email">
+    <label style="margin-top:8px">Senha</label>
+    <input id="pw" type="password" autocomplete="current-password">
+    
+    <p id="lmsg" class="${msg.startsWith('✔')?'ok':'err'}" style="margin:8px 0 0;font-size:13px">${esc(msg)}</p>
+    
+    <div style="margin-top:14px">
+      <button class="pri" id="bi" style="width:100%">Entrar</button>
+    </div>
+    
+    <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--bd);font-size:12px;color:var(--mut)">
+      <p style="margin:0 0 4px">💡 <b>Acesso Offline ao Sistema:</b></p>
+      <span>Para entrar sem internet, é necessário fazer login com o usuário online pelo menos uma vez neste aparelho. Os dados ficarão salvos para uso offline.</span>
+      ${savedEmails.length?`<div style="margin-top:8px;padding:6px 8px;background:var(--bg);border-radius:6px">
+        <b>Usuários disponíveis offline neste aparelho:</b><br>
+        ${savedEmails.map(e=>`· <a href="#" onclick="$('#em').value='${esc(e)}';$('#pw').focus();return false" style="color:var(--pri)">${esc(e)}</a>`).join('<br>')}
+      </div>`:''}
+    </div>
+  </div>`;
+
   const cred=()=>({email:$('#em').value.trim(),password:$('#pw').value});
-  $('#bi').onclick=async()=>{const{error}=await sb.auth.signInWithPassword(cred());if(error)loginView(error.message)};
-  $('#bc').onclick=async()=>{const{data,error}=await sb.auth.signUp(cred());if(error)return loginView(error.message);
-    if(!data.session)loginView('✔ Conta criada. Confirme o e-mail (se exigido) e entre.')};
-  $('#pw').onkeydown=e=>{if(e.key==='Enter')$('#bi').click()}}
-sb.auth.onAuthStateChange((ev)=>{if(ev==='SIGNED_IN'||ev==='SIGNED_OUT')setTimeout(boot,0)});
+
+  $('#bi').onclick=async()=>{
+    const c=cred();
+    if(!c.email||!c.password){loginView('Informe e-mail e senha.');return}
+    const btn=$('#bi');if(btn){btn.disabled=true;btn.textContent='Verificando…'}
+    try{localStorage.setItem(STORAGE.LAST_EMAIL,c.email)}catch(e){}
+
+    const online=await checkRealConnection();
+    if(online){
+      // Autenticação ONLINE no Supabase
+      const{data,error}=await sb.auth.signInWithPassword(c);
+      if(error){
+        // Se erro for de rede imprevisto, tenta offline
+        if(isNetworkError(error)){
+          return tentarLoginOffline(c,savedUsers);
+        }
+        loginView(error.message);return;
+      }
+      try{
+        const getP=()=>sb.from('perfis').select('*').eq('id',data.user.id).maybeSingle();
+        let{data:perfil,error:perr}=await getP();
+        if(!perfil){await sb.rpc('garantir_perfil');({data:perfil,error:perr}=await getP())}
+        if(perfil&&perfil.ativo){
+          const h=await hashCred(c.email,c.password);
+          saveOfflineUser(c.email,h,perfil);
+          setActiveProfile(perfil);
+          ME=perfil;
+          shell();
+          await refresh();
+          autoSyncIfOnline();
+          return;
+        }else{
+          loginView(perfil?'Sua conta está desativada.':'Perfil não encontrado no sistema.');return;
+        }
+      }catch(pe){
+        loginView('Erro ao carregar perfil: '+(pe.message||pe));return;
+      }
+    }else{
+      tentarLoginOffline(c,savedUsers);
+    }
+  };
+
+  $('#pw').onkeydown=e=>{if(e.key==='Enter')$('#bi').click()};
+}
+
+async function tentarLoginOffline(c,savedUsers){
+  const userKey=(c.email||'').toLowerCase().trim();
+  const savedUser=savedUsers[userKey];
+  if(!savedUser){
+    loginView('Este usuário ainda não entrou online neste aparelho. Conecte-se à internet para entrar a primeira vez.');
+    return;
+  }
+  const h=await hashCred(c.email,c.password);
+  if(h!==savedUser.hash){
+    loginView('Senha incorreta para acesso offline neste aparelho.');
+    return;
+  }
+  ME=savedUser.profile;
+  setActiveProfile(ME);
+  isAppOnline=false;
+  shell();
+  await refresh();
+}
+
+async function sair(){
+  const pend=getOfflineConferences().length;
+  if(pend>0){
+    if(!confirm(`Atenção: há ${pend} conferência(s) offline pendente(s) de envio.\n\nElas permanecerão salvas com segurança no aparelho.\n\nDeseja realmente sair agora?`))return;
+  }else{
+    if(!confirm('Deseja sair do sistema?'))return;
+  }
+  setActiveProfile(null);
+  ME=null;
+  try{if(isAppOnline)await sb.auth.signOut()}catch(e){}
+  loginView();
+}
+
+sb.auth.onAuthStateChange((ev)=>{if(ev==='SIGNED_IN'||ev==='SIGNED_OUT'){if(!ME&&!getActiveProfile())setTimeout(boot,0)}});
+
 function shell(){
-  const nav=[['dash','Painel'],['bens','Bens'],['scan','Leitor / Inventário'],['conf','Conferências'],['labels','Etiquetas QR'],['locais','Estrutura'],['hist','Movimentações']];if(adm())nav.push(['users','Usuários']);
-  $('#app').innerHTML=`<header><div class="top"><h1>📦 Patrimônio</h1><div class="mut" style="font-size:13px">${esc(ME.email)} · <span class="tag">${ME.papel}</span> <button class="sm" onclick="sb.auth.signOut()">Sair</button></div></div>
-  <nav id="nav">${nav.map(n=>`<button data-v="${n[0]}">${n[1]}</button>`).join('')}</nav></header><main id="main"></main>`;
-  $('#nav').onclick=e=>{const v=e.target.dataset.v;if(v){view=v;render()}}}
+  const nav=[['dash','Painel'],['bens','Bens'],['garantias','Garantias'],['scan','Leitor / Inventário'],['conf','Conferências'],['labels','Etiquetas QR'],['locais','Estrutura'],['hist','Movimentações']];
+  if(adm())nav.push(['users','Usuários']);
+  $('#app').innerHTML=`<header>
+    <div class="top">
+      <div style="display:flex;align-items:center;gap:8px">
+        <h1>📦 Patrimônio</h1>
+        <span id="netBadge" class="tag ${isAppOnline?'ok':'err'}" style="font-size:11px">${isAppOnline?'● Conectado':'● Offline'}</span>
+      </div>
+      <div class="mut" style="font-size:13px;display:flex;align-items:center;gap:8px">
+        <span>${esc(ME.email)} · <span class="tag">${ME.papel}</span></span>
+        <button class="sm" onclick="sair()">Sair</button>
+      </div>
+    </div>
+    <div id="syncBar"></div>
+    <nav id="nav">${nav.map(n=>`<button data-v="${n[0]}">${n[1]}</button>`).join('')}</nav>
+  </header><main id="main"></main>`;
+  $('#nav').onclick=e=>{const v=e.target.dataset.v;if(v){view=v;render()}};
+  updateOnlineBadge();
+}
+
 function render(){
   if(!ME||!$('#main'))return;
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('on',b.dataset.v===view));
-  if(view!=='scan')stopScan();({dash,bens,locais,scan,conf:confs,labels,users,hist})[view]()}
+  if(view!=='scan')stopScan();
+  updateOnlineBadge();
+  ({dash,bens,garantias,locais,scan,conf:confs,labels,users,hist})[view]();
+}
 
 /* ======== QR ======== */
 function qrSvg(t){const q=qrcode(0,'M');q.addData(t);q.make();return q.createSvgTag(4,0)}
@@ -179,39 +621,270 @@ function printLabels(ids){
 
 /* ======== PAINEL + ALERTAS ======== */
 function dash(){
-  const ativos=S.bens.filter(b=>b.status!=='Baixado'),vt=ativos.reduce((s,b)=>s+deprec(b).atual,0),dep=ativos.reduce((s,b)=>s+deprec(b).acum,0);
-  const man=S.manutencoes.filter(m=>m.status==='Agendada'&&inDays(m.data)<=30).sort((a,b)=>a.data<b.data?-1:1);
+  const disp=userLocais();
+  if(disp.length===1&&(!dashSec||dashSec!==disp[0].id))dashSec=disp[0].id;
+  else if(dashSec&&!disp.some(l=>l.id===dashSec))dashSec='';
+  const secSel=dashSec;
+  const bensBase=secSel?S.bens.filter(b=>b.local_id===secSel):(disp.length?S.bens.filter(b=>disp.some(l=>l.id===b.local_id)):(adm()?S.bens:[]));
+  const ativos=bensBase.filter(b=>b.status!=='Baixado'),vt=ativos.reduce((s,b)=>s+deprec(b).atual,0),dep=ativos.reduce((s,b)=>s+deprec(b).acum,0);
+  const baixadosQtd=bensBase.length-ativos.length;
+  const ativosIds=new Set(ativos.map(b=>b.id));
+  const man=S.manutencoes.filter(m=>m.status==='Agendada'&&inDays(m.data)<=30&&ativosIds.has(m.bem_id)).sort((a,b)=>a.data<b.data?-1:1);
   const gar=ativos.filter(b=>b.garantia_ate&&inDays(b.garantia_ate)<=30).sort((a,b)=>a.garantia_ate<b.garantia_ate?-1:1);
-  const porL=S.locais.map(l=>({n:l.nome,c:ativos.filter(b=>b.local_id===l.id).length})),mx=Math.max(1,...porL.map(x=>x.c));
+  const porL=(secSel?disp.filter(l=>l.id===secSel):disp).map(l=>({id:l.id,n:l.nome,c:ativos.filter(b=>b.local_id===l.id).length})),mx=Math.max(1,...porL.map(x=>x.c));
   const semG=ativos.filter(b=>b.local_id&&!b.gerencia_id).length;
   const al=(d)=>{const n=inDays(d);return n<0?`<b class="err">vencido há ${-n}d</b>`:`<b class="warn">em ${n}d</b>`};
-  $('#main').innerHTML=`${adm()?'':`<div class="card"><b>Suas secretarias:</b> ${S.locais.map(l=>esc(l.nome)).join(', ')||'<span class="err">nenhum — peça ao administrador para vincular um local ao seu usuário.</span>'}</div>`}<div class="grid"><div class="card kpi"><b>${ativos.length}</b><span>Bens em uso (${S.bens.length-ativos.length} baixados)</span></div>
+
+  let gerHtml='';
+  if(secSel){
+    const gers=(S.gerencias||[]).filter(g=>g.secretaria_id===secSel);
+    if(gers.length){
+      const porG=gers.map(g=>({n:g.nome,c:ativos.filter(b=>b.gerencia_id===g.id).length}));
+      const mxG=Math.max(1,...porG.map(x=>x.c));
+      const semGerDesta=ativos.filter(b=>!b.gerencia_id).length;
+      gerHtml=`<div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--bd)"><b style="font-size:13.5px">Gerências de ${esc(L(secSel))}</b>${semGerDesta?`<span class="mut" style="font-size:12px"> · ${semGerDesta} sem gerência definida</span>`:''}${porG.map(x=>`<div style="margin-top:8px"><div class="row" style="justify-content:space-between;flex-wrap:nowrap"><span>${esc(x.n)}</span><span class="mut" style="flex:0">${x.c}</span></div><div class="bar"><i style="width:${x.c/mxG*100}%"></i></div></div>`).join('')}</div>`;
+    }
+  }
+
+  $('#main').innerHTML=`<div class="card"><div class="row" style="align-items:center;justify-content:space-between"><div style="flex:1 1 240px"><label><b>Secretaria vinculada ao seu usuário:</b></label><select id="dSec">${disp.length>1?`<option value="">Todas as minhas secretarias (${disp.length})</option>`:''}${disp.map(l=>`<option value="${l.id}" ${l.id===secSel?'selected':''}>${esc(l.nome)}</option>`).join('')}</select></div>${secSel&&disp.length>1?`<button class="sm" id="dAll" style="align-self:flex-end">Mostrar todas</button>`:''}</div>${disp.length===0?'<p class="err" style="margin:8px 0 0;font-size:12.5px">Nenhuma secretaria vinculada ao seu usuário.</p>':''}</div>
+  <div class="grid"><div class="card kpi"><b>${ativos.length}</b><span>Bens em uso (${baixadosQtd} baixados)</span></div>
   <div class="card kpi"><b>${brl(vt)}</b><span>Valor contábil atual</span></div><div class="card kpi"><b>${brl(dep)}</b><span>Depreciação acumulada</span></div>
   <div class="card kpi"><b class="${ativos.some(b=>!b.verificado_em)?'warn':'ok'}">${ativos.filter(b=>!b.verificado_em).length}</b><span>Nunca conferidos</span></div></div>
   <div class="g2"><div class="card"><b>🔧 Manutenções (próx. 30 dias / vencidas)</b>${man.map(m=>{const b=S.bens.find(x=>x.id===m.bem_id)||{};return `<div style="margin-top:7px"><a href="#" onclick="showFicha('${b.id}');return false"><b>${esc(b.tombo)}</b></a> ${esc(m.tipo)} · ${dt(m.data)} ${al(m.data)}</div>`}).join('')||'<p class="mut">Nenhuma pendência.</p>'}</div>
-  <div class="card"><b>🛡 Garantias (vencendo / vencidas)</b>${gar.map(b=>`<div style="margin-top:7px"><a href="#" onclick="showFicha('${b.id}');return false"><b>${esc(b.tombo)}</b></a> ${esc(b.descricao).slice(0,26)} · ${dt(b.garantia_ate)} ${al(b.garantia_ate)}</div>`).join('')||'<p class="mut">Nenhuma garantia próxima do vencimento.</p>'}</div></div>
-  <div class="card"><b>Bens por secretaria</b>${semG?`<span class="mut" style="font-size:12.5px"> · ${semG} ainda sem gerência definida</span>`:''}${porL.map(x=>`<div style="margin-top:9px"><div class="row" style="justify-content:space-between;flex-wrap:nowrap"><span>${esc(x.n)}</span><span class="mut" style="flex:0">${x.c}</span></div><div class="bar"><i style="width:${x.c/mx*100}%"></i></div></div>`).join('')}</div>`}
+  <div class="card"><div class="row" style="justify-content:space-between;align-items:center;flex-wrap:nowrap"><b>🛡 Garantias (vencendo / vencidas)</b><button class="sm" onclick="view='garantias';render()">Ver todas ›</button></div>${gar.map(b=>`<div style="margin-top:7px"><a href="#" onclick="showFicha('${b.id}');return false"><b>${esc(b.tombo)}</b></a> ${esc(b.descricao).slice(0,26)} · ${dt(b.garantia_ate)} ${al(b.garantia_ate)}</div>`).join('')||'<p class="mut">Nenhuma garantia próxima do vencimento.</p>'}</div></div>
+  <div class="card"><b>${secSel?'Bens na secretaria: '+esc(L(secSel)):'Bens por secretaria'}</b>${!secSel&&semG?`<span class="mut" style="font-size:12.5px"> · ${semG} ainda sem gerência definida</span>`:''}${porL.map(x=>`<div style="margin-top:9px"><div class="row" style="justify-content:space-between;flex-wrap:nowrap"><span>${esc(x.n)}</span><span class="mut" style="flex:0">${x.c}</span></div><div class="bar"><i style="width:${x.c/mx*100}%"></i></div></div>`).join('')}${gerHtml}</div>`;
+
+  $('#dSec').onchange=e=>{dashSec=e.target.value;dash()};
+  if($('#dAll'))$('#dAll').onclick=()=>{dashSec='';dash()};
+}
+
+/* ======== GARANTIAS ======== */
+function filtradasGarantias(){
+  const cfg=diasCfg();
+  return S.bens.filter(b=>{
+    if(b.status==='Baixado'||!b.garantia_ate)return false;
+    if(FG.l&&b.local_id!==FG.l)return false;
+    if(FG.q){
+      const s=((b.tombo||'')+(b.descricao||'')+(b.marca||'')+(b.modelo||'')+(b.serie||'')+(b.responsavel||'')).toLowerCase();
+      if(!s.includes(FG.q.toLowerCase()))return false;
+    }
+    const n=inDays(b.garantia_ate);
+    if(FG.sit==='vencidas')return n<0;
+    if(FG.sit==='vencendo')return n>=0&&n<=cfg;
+    if(FG.sit==='vigentes')return n>cfg;
+    if(FG.sit==='todos')return true;
+    return n<=cfg;
+  }).sort((a,b)=>a.garantia_ate<b.garantia_ate?-1:1);
+}
+function garantias(){
+  const cfg=diasCfg(),r=filtradasGarantias(),todosComGar=S.bens.filter(b=>b.status!=='Baixado'&&b.garantia_ate);
+  const nVencidas=todosComGar.filter(b=>inDays(b.garantia_ate)<0).length;
+  const nVencendo=todosComGar.filter(b=>{const n=inDays(b.garantia_ate);return n>=0&&n<=cfg}).length;
+  const nVigentes=todosComGar.filter(b=>inDays(b.garantia_ate)>cfg).length;
+  const total=r.length,totalPages=Math.max(1,Math.ceil(total/perGar));
+  pageGar=Math.min(Math.max(1,pageGar),totalPages);
+  const slice=r.slice((pageGar-1)*perGar,pageGar*perGar);
+  $('#main').innerHTML=`<div class="grid">
+    <div class="card kpi"><b>${todosComGar.length}</b><span>Bens com garantia</span></div>
+    <div class="card kpi"><b class="${nVencidas?'err':'ok'}">${nVencidas}</b><span>Garantias vencidas</span></div>
+    <div class="card kpi"><b class="${nVencendo?'warn':'ok'}">${nVencendo}</b><span>Vencendo em até ${FG.qtd} ${FG.unidade}</span></div>
+    <div class="card kpi"><b class="ok">${nVigentes}</b><span>Vigentes (em dia)</span></div>
+  </div>
+  <div class="card">
+    <div class="row">
+      <input id="fgq" placeholder="Buscar tombo, descrição, marca…" value="${esc(FG.q)}">
+      <select id="fgl"><option value="">Todas as secretarias</option>${S.locais.map(l=>`<option value="${l.id}" ${l.id===FG.l?'selected':''}>${esc(l.nome)}</option>`).join('')}</select>
+      <select id="fgs">
+        <option value="" ${FG.sit===''?'selected':''}>Vencidas e Vencendo (alertas)</option>
+        <option value="vencidas" ${FG.sit==='vencidas'?'selected':''}>Apenas Vencidas</option>
+        <option value="vencendo" ${FG.sit==='vencendo'?'selected':''}>Apenas Vencendo</option>
+        <option value="vigentes" ${FG.sit==='vigentes'?'selected':''}>Vigentes (em dia)</option>
+        <option value="todos" ${FG.sit==='todos'?'selected':''}>Todos com garantia</option>
+      </select>
+    </div>
+    <div class="row" style="margin-top:8px;align-items:center;justify-content:space-between">
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+        <label style="margin:0;font-size:13px;white-space:nowrap">Considerar vencendo em até:</label>
+        <input type="number" id="fg_qtd" min="1" max="365" style="width:75px;padding:6px 8px" value="${FG.qtd}">
+        <select id="fg_unidade" style="width:105px;padding:6px 8px">
+          <option value="dias" ${FG.unidade==='dias'?'selected':''}>Dias</option>
+          <option value="meses" ${FG.unidade==='meses'?'selected':''}>Meses</option>
+        </select>
+      </div>
+      <div style="flex:0 0 auto">
+        <button onclick="imprimirGarantias()">🖨 Imprimir / PDF</button>
+      </div>
+    </div>
+    <p class="mut" style="margin:8px 0 0;font-size:13px">${total} bem(ns) listado(s) com os critérios atuais.</p>
+  </div>
+  <div class="card tw">
+    <table>
+      <tr><th>Tombo</th><th>Descrição</th><th>Alocação</th><th>Aquisição</th><th>Garantia até</th><th>Situação</th><th></th></tr>
+      ${slice.map(b=>{
+        const n=inDays(b.garantia_ate);
+        const tag=n<0?`<span class="tag err">Vencida há ${-n}d</span>`:(n===0?`<span class="tag err">Vence hoje</span>`:(n<=cfg?`<span class="tag warn">Vence em ${n}d</span>`:`<span class="tag ok">Em dia (${Math.round(n/30.4375)||1}m)</span>`));
+        return `<tr><td><b>${esc(b.tombo)}</b></td><td>${esc(b.descricao)}${b.marca||b.modelo?` <span class="mut">· ${esc([b.marca,b.modelo].filter(Boolean).join(' '))}</span>`:''}</td><td style="white-space:normal;min-width:180px">${esc(P(b.local_id,b.gerencia_id,b.equipamento_id))}</td><td>${dt(b.data_aquisicao)}</td><td><b>${dt(b.garantia_ate)}</b></td><td>${tag}</td><td><button class="sm" onclick="showFicha('${b.id}')">Ficha</button> <button class="sm" onclick="showQR('${b.id}')">QR</button></td></tr>`;
+      }).join('')||'<tr><td colspan="7" class="mut">Nenhum bem com garantia encontrado para os filtros selecionados.</td></tr>'}
+    </table>
+    ${paginacao(total,pageGar,perGar,'gar')}
+  </div>`;
+  $('#fgq').oninput=e=>{FG.q=e.target.value;pageGar=1;clearTimeout(garantias.t);garantias.t=setTimeout(()=>{garantias();const i=$('#fgq');i.focus();i.setSelectionRange(FG.q.length,FG.q.length)},250)};
+  $('#fgl').onchange=e=>{FG.l=e.target.value;pageGar=1;garantias()};
+  $('#fgs').onchange=e=>{FG.sit=e.target.value;pageGar=1;garantias()};
+  $('#fg_qtd').onchange=e=>{FG.qtd=Math.max(1,+e.target.value||30);pageGar=1;garantias()};
+  $('#fg_unidade').onchange=e=>{FG.unidade=e.target.value;pageGar=1;garantias()};
+}
+function imprimirGarantias(){
+  const r=filtradasGarantias(),cfg=diasCfg();
+  const sub=`Prazo de alerta: ${FG.qtd} ${FG.unidade} · `+(FG.l?L(FG.l):'Todas as secretarias')+(FG.sit?' · Situação: '+FG.sit:'');
+  relatorio('Relatório de Garantias Patrimoniais',sub,
+    ['Tombo','Descrição','Secretaria','Gerência / Unidade','Aquisição','Garantia até','Situação'],
+    r.map(b=>{
+      const n=inDays(b.garantia_ate);
+      const sitTxt=n<0?`Vencida há ${-n} dias`:(n===0?'Vence hoje':(n<=cfg?`Vence em ${n} dias`:'Vigente / Em dia'));
+      return [b.tombo,b.descricao+(b.marca?` (${b.marca})`:''),b.local_id?L(b.local_id):'—',[GN(b.gerencia_id),EN(b.equipamento_id)].filter(Boolean).join(' › ')||'—',dt(b.data_aquisicao),dt(b.garantia_ate),sitTxt];
+    }),
+    `Total: ${r.length} bem(ns) com garantia`);
+}
+
+/* ======== CATEGORIAS ======== */
+const CAT_PADRAO=['Mobiliário','Informática','Equipamento','Veículo','Eletrodoméstico'];
+function getCategoriasCustom(){
+  try{const raw=localStorage.getItem('pat_categorias_custom');if(raw){const arr=JSON.parse(raw);if(Array.isArray(arr))return arr}}catch(e){}
+  return [];
+}
+function saveCategoriasCustom(arr){try{localStorage.setItem('pat_categorias_custom',JSON.stringify(arr))}catch(e){}}
+function getCategorias(){
+  const custom=getCategoriasCustom();
+  const dbCats=(S.categorias||[]).map(c=>typeof c==='string'?c:(c&&c.nome)).filter(Boolean);
+  const bensCats=(S.bens||[]).map(b=>(b.categoria||'').trim()).filter(Boolean);
+  const all=[...new Set([...CAT_PADRAO,...custom,...dbCats,...bensCats])].map(s=>s.trim()).filter(Boolean);
+  return all.sort((a,b)=>a.localeCompare(b,'pt-BR'));
+}
+async function addCategoria(nome){
+  nome=(nome||'').trim();
+  if(!nome)throw new Error('Informe o nome da categoria.');
+  const cats=getCategorias();
+  if(cats.some(c=>c.toLowerCase()===nome.toLowerCase()))throw new Error('Esta categoria já existe.');
+  const custom=getCategoriasCustom();
+  if(!custom.some(c=>c.toLowerCase()===nome.toLowerCase())){
+    custom.push(nome);saveCategoriasCustom(custom);
+  }
+  try{await Repo.upsert('categorias',{nome});if(S.categorias)S.categorias.push({nome})}catch(e){}
+  return nome;
+}
+async function delCategoria(nome){
+  nome=(nome||'').trim();
+  const emUso=(S.bens||[]).filter(b=>((b.categoria||'').trim().toLowerCase()===nome.toLowerCase())).length;
+  if(emUso>0)throw new Error(`Não é possível excluir: existem ${emUso} bem(ns) nesta categoria.`);
+  let custom=getCategoriasCustom();
+  custom=custom.filter(c=>c.toLowerCase()!==nome.toLowerCase());
+  saveCategoriasCustom(custom);
+  try{
+    const dbItem=(S.categorias||[]).find(c=>((c&&c.nome)||c).toLowerCase()===nome.toLowerCase());
+    if(dbItem?.id)await Repo.remove('categorias',dbItem.id);
+  }catch(e){}
+}
+function formNovaCategoria(){
+  const cats=getCategorias(),contagem={},customList=getCategoriasCustom();
+  (S.bens||[]).forEach(b=>{const k=(b.categoria||'').trim();if(k)contagem[k.toLowerCase()]=(contagem[k.toLowerCase()]||0)+1});
+  $('#dlg').innerHTML=`<h3 style="margin-top:0">🏷 Categorias de Bens</h3>
+  <p class="mut" style="margin:4px 0 12px;font-size:13px">Cadastre novas categorias para classificar os bens patrimoniais.</p>
+  <div class="card" style="background:var(--bg);margin-bottom:12px">
+    <label style="font-weight:600">Nova Categoria</label>
+    <div class="row" style="margin-top:4px">
+      <input id="novaCatNome" placeholder="Ex.: Ferramentas, Audiovisual, Instrumentos…" style="flex:1">
+      <button class="pri" id="btnSalvarCat" onclick="salvarNovaCategoria()">+ Adicionar</button>
+    </div>
+    <p id="catErr" class="err" style="margin:6px 0 0;font-size:13px"></p>
+    <p id="catOk" class="ok" style="margin:6px 0 0;font-size:13px"></p>
+  </div>
+  <label style="font-weight:600;margin-bottom:6px">Categorias cadastradas (${cats.length})</label>
+  <div style="max-height:260px;overflow-y:auto;border:1px solid var(--bd);border-radius:8px">
+    <table><tr><th>Categoria</th><th>Bens</th><th></th></tr>
+    ${cats.map(c=>{
+      const qtd=contagem[c.toLowerCase()]||0,isPadrao=CAT_PADRAO.includes(c),isCustom=customList.some(x=>x.toLowerCase()===c.toLowerCase());
+      return `<tr><td><b>${esc(c)}</b> ${isPadrao?'<span class="tag" style="font-size:10px">padrão</span>':''}</td>
+      <td><span class="tag ${qtd?'ok':'mut'}">${qtd} bem(ns)</span></td>
+      <td style="text-align:right">
+        <button class="sm" onclick="$('#dlg').close();F.c='${esc(c)}';pageBens=1;bens()" title="Filtrar bens desta categoria">Filtrar</button>
+        ${!qtd&&isCustom?`<button class="sm bad" onclick="removerCategoria('${esc(c)}')" title="Excluir categoria">Excluir</button>`:''}
+      </td></tr>`;
+    }).join('')}
+    </table>
+  </div>
+  <div class="row" style="justify-content:flex-end;margin-top:14px"><button onclick="$('#dlg').close();bens()">Fechar</button></div>`;
+  $('#novaCatNome').onkeydown=e=>{if(e.key==='Enter')salvarNovaCategoria()};
+  if(!$('#dlg').open)$('#dlg').showModal();
+}
+async function salvarNovaCategoria(){
+  const inp=$('#novaCatNome'),err=$('#catErr'),ok=$('#catOk');
+  if(!inp)return;err.textContent='';ok.textContent='';
+  const nome=(inp.value||'').trim();
+  if(!nome){err.textContent='Informe o nome da categoria.';return}
+  try{
+    await addCategoria(nome);
+    ok.textContent=`Categoria "${nome}" cadastrada com sucesso!`;
+    inp.value='';
+    setTimeout(formNovaCategoria,500);
+  }catch(e){err.textContent=e.message||String(e)}
+}
+async function removerCategoria(nome){
+  if(!confirm(`Excluir a categoria "${nome}"?`))return;
+  try{await delCategoria(nome);formNovaCategoria()}catch(e){alert(e.message||String(e))}
+}
+async function novaCategoriaRapida(){
+  const nome=prompt('Nome da nova categoria:');
+  if(!nome||!nome.trim())return;
+  try{
+    const cat=await addCategoria(nome.trim());
+    const dl=$('#cats');if(dl)dl.innerHTML=getCategorias().map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('');
+    const inp=$('#bemCatInput')||$('input[name=categoria]');
+    if(inp)inp.value=cat;
+  }catch(e){alert(e.message||String(e))}
+}
+window.limparFiltrosBens=()=>{F.q='';F.s='';F.c='';F.l='';F.g='';F.e='';pageBens=1;bens()};
 
 /* ======== BENS ======== */
 const FOPT={todos:true,sem:true,ph:['Todas as secretarias','Todas as gerências','Todos os equipamentos']};
 const matchEst=(b,f)=>(!f.l||b.local_id===f.l)&&(f.g==='_'?!b.gerencia_id:(!f.g||b.gerencia_id===f.g))&&(!f.e||b.equipamento_id===f.e);
-function filtrados(){return S.bens.filter(b=>matchEst(b,F)&&(!F.s||b.status===F.s)&&(!F.q||(b.tombo+b.descricao+(b.serie||'')+(b.responsavel||'')).toLowerCase().includes(F.q.toLowerCase())))}
+const matchCat=b=>{
+  if(!F.c)return true;
+  const k=(b.categoria||'').trim();
+  if(F.c==='_sem_')return !k;
+  return k.toLowerCase()===F.c.toLowerCase();
+};
+function filtrados(){
+  return S.bens.filter(b=>matchEst(b,F)&&matchCat(b)&&(!F.s||b.status===F.s)&&(!F.q||(b.tombo+b.descricao+(b.serie||'')+(b.responsavel||'')+(b.categoria||'')).toLowerCase().includes(F.q.toLowerCase())));
+}
 function bens(){
   const r=filtrados();
-  $('#main').innerHTML=`<div class="card"><div class="row"><input id="fq" placeholder="Buscar tombo, descrição, série…" value="${esc(F.q)}">
-  <select id="fs"><option value="">Todos os status</option>${STATUS.map(s=>`<option ${F.s===s?'selected':''}>${s}</option>`).join('')}</select></div>
+  const total=r.length,totalPages=Math.max(1,Math.ceil(total/perBens));
+  pageBens=Math.min(Math.max(1,pageBens),totalPages);
+  const slice=r.slice((pageBens-1)*perBens,pageBens*perBens);
+  const cats=getCategorias(),catCount={};
+  let semCatQtd=0;
+  S.bens.forEach(b=>{const k=(b.categoria||'').trim();if(!k)semCatQtd++;else catCount[k]=(catCount[k]||0)+1});
+
+  $('#main').innerHTML=`<div class="card"><div class="row">
+  <input id="fq" placeholder="Buscar tombo, descrição, série, categoria…" value="${esc(F.q)}">
+  <select id="fc"><option value="">Todas as categorias</option>${cats.map(c=>`<option value="${esc(c)}" ${F.c===c?'selected':''}>${esc(c)}${catCount[c]?` (${catCount[c]})`:''}</option>`).join('')}${semCatQtd?`<option value="_sem_" ${F.c==='_sem_'?'selected':''}>Sem categoria (${semCatQtd})</option>`:''}</select>
+  <select id="fs"><option value="">Todos os status</option>${STATUS.map(s=>`<option ${F.s===s?'selected':''}>${s}</option>`).join('')}</select>
+  </div>
   <div class="g2" style="margin-top:8px">${cascata('ft',{s:F.l,g:F.g,e:F.e},FOPT)}</div>
-  <div class="row" style="margin-top:8px">${adm()?`<button class="pri" onclick="formBem()">+ Novo bem</button><button onclick="$('#imp').click()">⬆ Importar CSV/Excel</button><input id="imp" type="file" accept=".csv,.xlsx,.xls" style="display:none">`:''}
+  <div class="row" style="margin-top:8px">${adm()?`<button class="pri" onclick="formBem()">+ Novo bem</button><button onclick="formNovaCategoria()">+ Nova categoria</button><button onclick="$('#imp').click()">⬆ Importar CSV/Excel</button><input id="imp" type="file" accept=".csv,.xlsx,.xls" style="display:none">`:''}
   <button onclick="exportar('xlsx')">⬇ Excel</button><button onclick="exportar('csv')">⬇ CSV</button><button onclick="imprimirBens()">🖨 Relatório</button></div>
-  <p class="mut" style="margin:8px 0 0;font-size:13px">${r.length} bem(ns) ${F.q||F.s||F.l||F.g||F.e?'com os filtros atuais':'cadastrado(s)'} · exportações e relatório seguem os filtros.</p></div>
-  <div class="card tw"><table><tr><th>Tombo</th><th>Descrição</th><th>Alocação</th><th>Status</th><th>Valor atual</th><th>Conferido</th><th></th></tr>
-  ${r.map(b=>`<tr><td><b>${esc(b.tombo)}</b></td><td>${esc(b.descricao)}</td><td style="white-space:normal;min-width:190px">${esc(P(b.local_id,b.gerencia_id,b.equipamento_id))}</td><td><span class="tag">${esc(b.status)}</span></td><td>${b.status==='Baixado'?'—':brl(deprec(b).atual)}</td><td class="${b.verificado_em?'':'warn'}">${dt(b.verificado_em)}</td>
-  <td><button class="sm" onclick="showFicha('${b.id}')">Ficha</button> <button class="sm" onclick="showQR('${b.id}')">QR</button>${b.status!=='Baixado'?` <button class="sm" onclick="formMover('${b.id}')">Mover</button>`:''}${adm()?` <button class="sm" onclick="formBem('${b.id}')">Editar</button> <button class="sm bad" onclick="delBem('${b.id}')">Excluir</button>`:''}</td></tr>`).join('')||'<tr><td colspan="7" class="mut">Nenhum bem encontrado.</td></tr>'}</table></div>`;
-  $('#fq').oninput=e=>{F.q=e.target.value;clearTimeout(bens.t);bens.t=setTimeout(()=>{bens();const i=$('#fq');i.focus();i.setSelectionRange(F.q.length,F.q.length)},250)};
-  $('#fts').onchange=e=>{F.l=e.target.value;F.g='';F.e='';bens()};
-  $('#ftg').onchange=e=>{F.g=e.target.value;F.e='';bens()};
-  $('#fte').onchange=e=>{F.e=e.target.value;bens()};
-  $('#fs').onchange=e=>{F.s=e.target.value;bens()};
+  <p class="mut" style="margin:8px 0 0;font-size:13px">${total} bem(ns) ${F.q||F.s||F.l||F.g||F.e||F.c?'com os filtros atuais':'cadastrado(s)'}${F.q||F.s||F.l||F.g||F.e||F.c?' · <a href="#" onclick="limparFiltrosBens();return false" style="color:var(--pri)">Limpar filtros</a>':''} · exportações e relatório seguem os filtros.</p></div>
+  <div class="card tw"><table><tr><th>Tombo</th><th>Descrição</th><th>Alocação</th><th>Categoria</th><th>Status</th><th>Valor atual</th><th>Conferido</th><th></th></tr>
+  ${slice.map(b=>`<tr><td><b>${esc(b.tombo)}</b></td><td>${esc(b.descricao)}</td><td style="white-space:normal;min-width:190px">${esc(P(b.local_id,b.gerencia_id,b.equipamento_id))}</td><td>${b.categoria?`<span class="tag">${esc(b.categoria)}</span>`:'<span class="mut">—</span>'}</td><td><span class="tag">${esc(b.status)}</span></td><td>${b.status==='Baixado'?'—':brl(deprec(b).atual)}</td><td class="${b.verificado_em?'':'warn'}">${dt(b.verificado_em)}</td>
+  <td><button class="sm" onclick="showFicha('${b.id}')">Ficha</button> <button class="sm" onclick="showQR('${b.id}')">QR</button>${b.status!=='Baixado'?` <button class="sm" onclick="formMover('${b.id}')">Mover</button>`:''}${adm()?` <button class="sm" onclick="formBem('${b.id}')">Editar</button> <button class="sm bad" onclick="delBem('${b.id}')">Excluir</button>`:''}</td></tr>`).join('')||'<tr><td colspan="8" class="mut">Nenhum bem encontrado.</td></tr>'}</table>
+  ${paginacao(total,pageBens,perBens,'bens')}</div>`;
+  $('#fq').oninput=e=>{F.q=e.target.value;pageBens=1;clearTimeout(bens.t);bens.t=setTimeout(()=>{bens();const i=$('#fq');i.focus();i.setSelectionRange(F.q.length,F.q.length)},250)};
+  $('#fc').onchange=e=>{F.c=e.target.value;pageBens=1;bens()};
+  $('#fts').onchange=e=>{F.l=e.target.value;F.g='';F.e='';pageBens=1;bens()};
+  $('#ftg').onchange=e=>{F.g=e.target.value;F.e='';pageBens=1;bens()};
+  $('#fte').onchange=e=>{F.e=e.target.value;pageBens=1;bens()};
+  $('#fs').onchange=e=>{F.s=e.target.value;pageBens=1;bens()};
   if($('#imp'))$('#imp').onchange=e=>importar(e.target.files[0]);}
 
 /* ---- Ficha do bem ---- */
@@ -239,7 +912,7 @@ function formBem(id){
   const sel=(k,l,o)=>`<div><label>${l}</label><select name="${k}">${o.map(x=>`<option ${b[k]===x?'selected':''}>${x}</option>`).join('')}</select></div>`;
   $('#dlg').innerHTML=`<h3 style="margin-top:0">${id?'Editar':'Novo'} bem</h3><div class="g2">
   ${f('tombo','Nº patrimônio (tombo) *')}${f('descricao','Descrição *')}
-  <div><label>Categoria</label><input name="categoria" list="cats" value="${esc(b.categoria)}"><datalist id="cats">${[...new Set(S.bens.map(x=>x.categoria).filter(Boolean).concat(['Mobiliário','Informática','Equipamento','Veículo','Eletrodoméstico']))].map(c=>`<option>${esc(c)}</option>`).join('')}</datalist></div>
+  <div><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px"><label style="margin:0">Categoria</label><button type="button" class="sm" onclick="novaCategoriaRapida()" style="padding:1px 7px;font-size:11.5px">+ Nova categoria</button></div><input name="categoria" id="bemCatInput" list="cats" value="${esc(b.categoria)}" placeholder="Selecione ou digite..."><datalist id="cats">${getCategorias().map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('')}</datalist></div>
   ${f('marca','Marca')}${f('modelo','Modelo')}${f('serie','Nº de série')}${f('valor','Valor de aquisição (R$)','number','step="0.01"')}${f('data_aquisicao','Data de aquisição','date')}
   ${f('vida_util_anos','Vida útil (anos)','number','step="0.5"')}${f('valor_residual','Valor residual (R$)','number','step="0.01"')}${f('garantia_ate','Garantia até','date')}
   ${sel('estado','Estado de conservação',ESTADOS)}${sel('status','Status',STATUS)}
@@ -423,19 +1096,28 @@ async function saveUser(id){if(!adm())return;const p=S.perfis.find(x=>x.id===id)
 let leitura='avulso',modoAvulso='consulta',fila=[],finFila=false;
 function scan(){
   const lote=leitura==='lote';modo=lote?'inv':modoAvulso;
+  const permitidos=adm()?S.locais:userLocais();
+  const semLocais=modo==='inv'&&!permitidos.length;
+  const optLocais=permitidos.length?permitidos.map(l=>`<option value="${l.id}">${esc(l.nome)}</option>`).join(''):'<option value="">Nenhum local autorizado</option>';
+
   $('#main').innerHTML=`<div class="card"><div class="row">
   <div><label>Tipo de leitura</label><select id="lt"><option value="avulso">Avulso — um por vez</option><option value="lote">Em lote — câmera contínua</option></select></div>
   <div id="mdw"><label>Finalidade</label><select id="md"><option value="consulta">Consulta</option><option value="inv">Inventário (conferir bens do local)</option></select></div>
-  <div id="invw"><label>Local sendo conferido</label><select id="il">${S.locais.map(l=>`<option value="${l.id}">${esc(l.nome)}</option>`).join('')}</select></div></div>
-  <div class="row" style="margin-top:10px"><button class="pri" id="bs">📷 Ler com a câmera</button><button id="bx" style="display:none">Parar</button>
+  <div id="invw"><label>Local sendo conferido</label><select id="il" ${!permitidos.length?'disabled':''}>${optLocais}</select>
+  ${semLocais?'<p class="err" style="margin:4px 0 0;font-size:12.5px">⚠ Seu usuário não possui nenhuma secretaria liberada para inventário. Solicite a um administrador para vincular seu acesso na tela de Usuários.</p>':''}
+  </div></div>
+  <div class="row" style="margin-top:10px"><button class="pri" id="bs" ${semLocais?'disabled':''}>📷 Ler com a câmera</button><button id="bx" style="display:none">Parar</button>
   <label style="display:flex;gap:6px;align-items:center;color:var(--tx);font-size:14px;margin:0;flex:0 0 auto"><input type="checkbox" id="som" style="width:auto"> 🔊 Bip</label>
   <label style="display:flex;gap:6px;align-items:center;color:var(--tx);font-size:14px;margin:0;flex:0 0 auto"><input type="checkbox" id="vib" style="width:auto"> 📳 Vibrar</label></div>
   <div id="reader" style="margin-top:10px"></div><p id="cerr" class="err"></p>
-  <div class="row"><input id="man" placeholder="Ou digite o tombo (ex.: PAT-000001)"><button onclick="onCode($('#man').value)">${lote?'Adicionar à fila':'Buscar'}</button></div>
+  <div class="row"><input id="man" placeholder="Ou digite o tombo (ex.: PAT-000001)" ${semLocais?'disabled':''}><button ${semLocais?'disabled':''} onclick="onCode($('#man').value)">${lote?'Adicionar à fila':'Buscar'}</button></div>
   <p id="aviso" class="mut" style="margin:8px 0 0;font-size:13px">${lote?'Aponte a câmera para os QR Codes: cada bem lido entra na fila abaixo, sem fechar a câmera.':''}</p></div>
   <div id="fila"></div><div id="res"></div><div id="inv"></div>`;
   $('#lt').value=leitura;$('#mdw').style.display=lote?'none':'';$('#md').value=modoAvulso;
-  $('#il').value=invLocal||S.locais[0]?.id||'';invLocal=$('#il').value;$('#invw').style.display=modo==='inv'?'':'none';
+  const validInvLocal=(invLocal&&permitidos.some(l=>l.id===invLocal))?invLocal:(permitidos[0]?.id||'');
+  invLocal=validInvLocal;
+  if($('#il'))$('#il').value=invLocal;
+  $('#invw').style.display=modo==='inv'?'':'none';
   $('#lt').onchange=async e=>{await stopScan();if(leitura==='avulso')modoAvulso=modo;leitura=e.target.value;fila=[];sess=[];curConf=null;scan()};
   $('#md').onchange=e=>{modo=modoAvulso=e.target.value;$('#invw').style.display=modo==='inv'?'':'none';invList()};
   $('#il').onchange=e=>{invLocal=e.target.value;sess=[];curConf=null;fila=[];renderFila();invList()};
@@ -454,19 +1136,44 @@ function moverFila(id,v){const it=fila.find(x=>x.id===id);if(it)it.mover=v}
 async function confirmarFila(){
   if(!fila.length)return;const btn=$('#bconf');if(btn){btn.disabled=true;btn.textContent='Registrando…'}
   let ok=0,falhas=0;
-  try{
-    if(!curConf)curConf=await Repo.rpc('iniciar_conferencia',{p_local:invLocal,p_tipo:'Inventário'});
-    for(const it of [...fila]){
-      try{await Repo.rpc('conferir_bem',{p_bem:it.id,p_local:invLocal,p_mover:!!it.mover,p_conf:curConf});ok++;if(!sess.includes(it.id))sess.push(it.id);fila=fila.filter(x=>x.id!==it.id)}
-      catch(e){falhas++;it.erro=e.message||String(e)}
+  if(isAppOnline){
+    try{
+      if(!curConf)curConf=await Repo.rpc('iniciar_conferencia',{p_local:invLocal,p_tipo:'Inventário'});
+      for(const it of [...fila]){
+        try{await Repo.rpc('conferir_bem',{p_bem:it.id,p_local:invLocal,p_mover:!!it.mover,p_conf:curConf});ok++;if(!sess.includes(it.id))sess.push(it.id);fila=fila.filter(x=>x.id!==it.id)}
+        catch(e){falhas++;it.erro=e.message||String(e)}
+      }
+      await reload();
+      if(finFila&&!falhas){
+        const mk=$('#mk');await Repo.rpc('finalizar_conferencia',{p_conf:curConf,p_marcar:!!(mk&&mk.checked)});
+        const id=curConf;curConf=null;sess=[];fila=[];await reload();renderFila();invList();goConf=true;showConf(id);return}
+      $('#res').innerHTML=`<div class="card ${falhas?'warn':'ok'}">✔ ${ok} bem(ns) confirmado(s) no inventário${falhas?` · <span class="err">${falhas} com erro (mantidos na fila)</span>`:''}.${finFila&&falhas?' O inventário não foi finalizado.':''}</div>`;
+      renderFila();invList();return;
+    }catch(e){
+      if(isNetworkError(e)){
+        return confirmarFilaOffline();
+      }
+      $('#res').innerHTML=`<div class="card err"><b>Falha ao confirmar:</b> ${esc(e.message||e)}</div>`;
+      renderFila();invList();return;
     }
-    await reload();
-    if(finFila&&!falhas){
-      const mk=$('#mk');await Repo.rpc('finalizar_conferencia',{p_conf:curConf,p_marcar:!!(mk&&mk.checked)});
-      const id=curConf;curConf=null;sess=[];fila=[];await reload();renderFila();invList();goConf=true;showConf(id);return}
-    $('#res').innerHTML=`<div class="card ${falhas?'warn':'ok'}">✔ ${ok} bem(ns) confirmado(s) no inventário${falhas?` · <span class="err">${falhas} com erro (mantidos na fila)</span>`:''}.${finFila&&falhas?' O inventário não foi finalizado.':''}</div>`;
-  }catch(e){$('#res').innerHTML=`<div class="card err"><b>Falha ao confirmar:</b> ${esc(e.message||e)}</div>`}
-  renderFila();invList()}
+  }else{
+    return confirmarFilaOffline();
+  }
+}
+async function confirmarFilaOffline(){
+  let ok=0;
+  for(const it of [...fila]){
+    await confOffline(it.id,it.mover,true);
+    ok++;
+    fila=fila.filter(x=>x.id!==it.id);
+  }
+  if(finFila){
+    await finalizarInvOffline();
+    return;
+  }
+  $('#res').innerHTML=`<div class="card ok">✔ ${ok} bem(ns) confirmado(s) <b>offline</b> e salvos no aparelho.</div>`;
+  renderFila();invList();
+}
 async function startScan(){
   audioInit();$('#cerr').textContent='';
   const msg=e=>(e&&e.message)||String(e);
@@ -500,55 +1207,526 @@ function onCode(code){code=(code||'').trim();if(!code)return;const n=Date.now();
   <div class="row" style="margin-top:8px">${modo==='inv'?`<button class="pri" onclick="conf('${b.id}',false)">✔ Confirmar presença</button>${dif?`<button onclick="conf('${b.id}',true)">Mover para ${esc(L(invLocal))}</button>`:''}`:`<button onclick="showFicha('${b.id}')">Abrir ficha</button><button onclick="conf('${b.id}',false)">Registrar conferência</button>`}<button onclick="cancelarBusca()">Cancelar</button></div></div>`}
 function cancelarBusca(){$('#res').innerHTML='';const m=$('#man');if(m)m.value='';lastScan={c:'',t:0}}
 let curConf=null;
-async function reload(){const[b,m,c,i]=await Promise.all([Repo.list('bens'),Repo.list('movimentacoes'),Repo.list('conferencias').catch(()=>S.conferencias||[]),Repo.list('conferencia_itens').catch(()=>S.conferencia_itens||[])]);S.bens=b;S.movimentacoes=m;S.conferencias=c;S.conferencia_itens=i}
+async function reload(){
+  if(isAppOnline){
+    try{
+      const[b,m,c,i]=await Promise.all([
+        Repo.list('bens'),
+        Repo.list('movimentacoes'),
+        Repo.list('conferencias').catch(()=>S.conferencias||[]),
+        Repo.list('conferencia_itens').catch(()=>S.conferencia_itens||[])
+      ]);
+      S.bens=b;S.movimentacoes=m;S.conferencias=c;S.conferencia_itens=i;
+      saveCacheData(S);
+    }catch(e){
+      console.warn('Erro ao recarregar online, utilizando cache:',e);
+      isAppOnline=false;
+      const cached=getCacheData();
+      if(cached){
+        S.bens=cached.bens||S.bens;
+        S.movimentacoes=cached.movimentacoes||S.movimentacoes;
+        S.conferencias=cached.conferencias||S.conferencias;
+        S.conferencia_itens=cached.conferencia_itens||S.conferencia_itens;
+      }
+    }
+  }else{
+    const cached=getCacheData();
+    if(cached){
+      S.bens=cached.bens||S.bens;
+      S.movimentacoes=cached.movimentacoes||S.movimentacoes;
+      S.conferencias=cached.conferencias||S.conferencias;
+      S.conferencia_itens=cached.conferencia_itens||S.conferencia_itens;
+    }
+  }
+  mergeOfflineConferencesIntoState();
+  updateOnlineBadge();
+}
+
 async function conf(id,move){
   const b0=S.bens.find(x=>x.id===id);
-  try{
-    if(modo==='inv'&&!curConf)curConf=await Repo.rpc('iniciar_conferencia',{p_local:invLocal,p_tipo:'Inventário'});
-    await Repo.rpc('conferir_bem',{p_bem:id,p_local:modo==='inv'?invLocal:null,p_mover:move,p_conf:modo==='inv'?curConf:null});
-    if(modo==='inv'&&!sess.includes(id))sess.push(id);
-    await reload();
-    const b=S.bens.find(x=>x.id===id);
-    if(!b.verificado_em||b.verificado_em===b0.verificado_em)throw new Error('O banco não registrou a conferência.');
-    $('#res').innerHTML=`<div class="card ok">✔ ${esc(b.tombo)} conferido em ${new Date(b.verificado_em).toLocaleString('pt-BR')} e gravado no banco.</div>`;
-  }catch(e){$('#res').innerHTML=`<div class="card err"><b>Falha ao registrar a conferência:</b> ${esc(e.message||e)}<br><span class="mut">Se citar função ou tabela inexistente, rode o conferencia.sql no Supabase.</span></div>`}
-  invList()}
-function invList(){const w=$('#inv');if(!w)return;if(modo!=='inv'){w.innerHTML='';return}
-  const esp=S.bens.filter(b=>b.local_id===invLocal&&b.status!=='Baixado'),falt=esp.filter(b=>!sess.includes(b.id));
-  w.innerHTML=`<div class="card"><b>Inventário: ${esc(L(invLocal))}</b><p class="mut" style="margin:4px 0">${sess.length} conferidos · <span class="${falt.length?'warn':'ok'}">${falt.length} faltando</span> de ${esp.length}</p>
-  ${falt.map(b=>`<div style="padding:5px 0;border-top:1px solid var(--bd)"><b>${esc(b.tombo)}</b> ${esc(b.descricao)}</div>`).join('')}
-  <label style="margin-top:10px;display:flex;gap:6px;align-items:center;font-size:14px;color:var(--tx)"><input type="checkbox" id="mk" style="width:auto"> Marcar faltantes como “Não localizado”</label>
-  <button class="pri" style="margin-top:8px" onclick="finalizarInv()">Finalizar inventário</button></div>`}
+  if(!b0)return;
+  if(isAppOnline){
+    try{
+      if(modo==='inv'&&!curConf)curConf=await Repo.rpc('iniciar_conferencia',{p_local:invLocal,p_tipo:'Inventário'});
+      await Repo.rpc('conferir_bem',{p_bem:id,p_local:modo==='inv'?invLocal:null,p_mover:move,p_conf:modo==='inv'?curConf:null});
+      if(modo==='inv'&&!sess.includes(id))sess.push(id);
+      await reload();
+      const b=S.bens.find(x=>x.id===id);
+      $('#res').innerHTML=`<div class="card ok">✔ <b>${esc(b.tombo)}</b> conferido em ${new Date(b.verificado_em||Date.now()).toLocaleString('pt-BR')} e gravado no banco.</div>`;
+      invList();
+      return;
+    }catch(e){
+      if(isNetworkError(e)){
+        await confOffline(id,move);
+        invList();
+        return;
+      }
+      $('#res').innerHTML=`<div class="card err"><b>Falha ao registrar a conferência:</b> ${esc(e.message||e)}</div>`;
+      invList();
+      return;
+    }
+  }else{
+    await confOffline(id,move);
+    invList();
+  }
+}
+
+async function confOffline(id,move,silent=false){
+  const b=S.bens.find(x=>x.id===id);
+  if(!b)return;
+  const nowIso=new Date().toISOString();
+  const oldLocal=b.local_id;
+  const newLocal=move?invLocal:oldLocal;
+  const resTipo=move?'Movido':(invLocal&&oldLocal&&oldLocal!==invLocal?'Local divergente':'Presente');
+
+  if(modo==='inv'){
+    if(!curConf||!String(curConf).startsWith('off_')){
+      curConf='off_'+uid();
+      const newConf={
+        id:curConf,
+        local_id:invLocal,
+        tipo:'Inventário',
+        usuario_email:ME.email,
+        iniciada_em:nowIso,
+        finalizada_em:null,
+        marcar_faltantes:false,
+        total_esperado:S.bens.filter(x=>x.local_id===invLocal&&x.status!=='Baixado').length,
+        is_offline:true,
+        itens:[]
+      };
+      saveOfflineConference(newConf);
+    }
+    if(!sess.includes(id))sess.push(id);
+
+    const offConf=getOfflineConferences().find(c=>c.id===curConf);
+    if(offConf){
+      const itIdx=offConf.itens.findIndex(it=>it.bem_id===id);
+      const itData={id:uid(),conferencia_id:curConf,bem_id:id,resultado:resTipo,local_encontrado_id:invLocal||oldLocal,data:nowIso,mover:!!move};
+      if(itIdx>=0)offConf.itens[itIdx]=itData;else offConf.itens.push(itData);
+      saveOfflineConference(offConf);
+    }
+  }else{
+    const avId='off_'+uid();
+    const avConf={
+      id:avId,
+      local_id:newLocal,
+      tipo:'Avulsa',
+      usuario_email:ME.email,
+      iniciada_em:nowIso,
+      finalizada_em:nowIso,
+      marcar_faltantes:false,
+      total_esperado:1,
+      is_offline:true,
+      itens:[{id:uid(),conferencia_id:avId,bem_id:id,resultado:resTipo,local_encontrado_id:invLocal||oldLocal,data:nowIso,mover:!!move}]
+    };
+    saveOfflineConference(avConf);
+  }
+
+  b.verificado_em=nowIso;
+  if(move)b.local_id=invLocal;
+  if(b.status==='Não localizado')b.status='Ativo';
+  saveCacheData(S);
+  mergeOfflineConferencesIntoState();
+  updateOnlineBadge();
+
+  if(!silent){
+    $('#res').innerHTML=`<div class="card ok">✔ <b>${esc(b.tombo)}</b> conferido <b>offline</b> (${resTipo}) em ${new Date(nowIso).toLocaleString('pt-BR')}. Salvo no aparelho para envio futuro.</div>`;
+  }
+}
+let invCat = '';
+function invList(){
+  const w=$('#inv');if(!w)return;if(modo!=='inv'){w.innerHTML='';return}
+  const esp=S.bens.filter(b=>b.local_id===invLocal&&b.status!=='Baixado');
+  const catMap={};
+  esp.forEach(b=>{const k=(b.categoria||'').trim()||'Sem categoria';catMap[k]=(catMap[k]||0)+1});
+  const catList=Object.keys(catMap).sort((a,b)=>a.localeCompare(b,'pt-BR')).map(k=>({nome:k,qtd:catMap[k]}));
+  const espFiltrados=invCat?esp.filter(b=>((b.categoria||'').trim()||'Sem categoria')===invCat):esp;
+  const falt=espFiltrados.filter(b=>!sess.includes(b.id));
+  const confQtd=espFiltrados.filter(b=>sess.includes(b.id)).length;
+
+  w.innerHTML=`<div class="card">
+    <div class="row" style="justify-content:space-between;align-items:center;flex-wrap:nowrap">
+      <b>Inventário: ${esc(L(invLocal))}</b>
+      <button class="sm" onclick="imprimirInvAtivo()">🖨 Imprimir lista</button>
+    </div>
+    <p class="mut" style="margin:4px 0">${confQtd} conferidos · <span class="${falt.length?'warn':'ok'}">${falt.length} faltando</span> de ${espFiltrados.length}${invCat?` (categoria: <i>${esc(invCat)}</i>)`:''}</p>
+    <div class="row" style="margin:8px 0;align-items:center;gap:6px">
+      <label style="margin:0;font-size:13px;white-space:nowrap">Filtrar por Categoria:</label>
+      <select id="invCatSel" style="flex:1;padding:4px 8px;font-size:13px">
+        <option value="">Todas as categorias (${esp.length} itens)</option>
+        ${catList.map(x=>`<option value="${esc(x.nome)}" ${x.nome===invCat?'selected':''}>${esc(x.nome)} (${x.qtd} item${x.qtd>1?'s':''})</option>`).join('')}
+      </select>
+      ${invCat?`<button class="sm" onclick="invCat='';invList()">Limpar</button>`:''}
+    </div>
+    <div style="max-height:220px;overflow-y:auto;border:1px solid var(--bd);border-radius:8px;padding:4px 8px;margin-bottom:8px">
+      ${falt.map(b=>`<div style="padding:5px 0;border-top:1px solid var(--bd)"><b>${esc(b.tombo)}</b> ${esc(b.descricao)} <span class="tag" style="font-size:11px">${esc(b.categoria||'Sem categoria')}</span></div>`).join('')||'<p class="ok" style="margin:8px 0;font-size:13px">✔ Todos os bens conferidos nesta categoria!</p>'}
+    </div>
+    <label style="margin-top:10px;display:flex;gap:6px;align-items:center;font-size:14px;color:var(--tx)"><input type="checkbox" id="mk" style="width:auto"> Marcar faltantes como “Não localizado”</label>
+    <button class="pri" style="margin-top:8px" onclick="finalizarInv()">Finalizar inventário</button>
+  </div>`;
+  $('#invCatSel').onchange=e=>{invCat=e.target.value;invList()};
+}
+function imprimirInvAtivo(){
+  const esp=S.bens.filter(b=>b.local_id===invLocal&&b.status!=='Baixado');
+  const espFiltrados=invCat?esp.filter(b=>((b.categoria||'').trim()||'Sem categoria')===invCat):esp;
+  const falt=espFiltrados.filter(b=>!sess.includes(b.id));
+  const conf=espFiltrados.filter(b=>sess.includes(b.id));
+  const sub=`Local: ${L(invLocal)} · `+(invCat?`Categoria: ${invCat} · `:'')+`${conf.length} conferidos, ${falt.length} faltantes de ${espFiltrados.length}`;
+  relatorio('Lista de Inventário — '+L(invLocal), sub,
+    ['Tombo', 'Descrição', 'Categoria', 'Alocação', 'Situação no inventário'],
+    espFiltrados.map(b=>[
+      b.tombo,
+      b.descricao,
+      b.categoria||'Sem categoria',
+      P(b.local_id,b.gerencia_id,b.equipamento_id),
+      sess.includes(b.id)?'Conferido (Presente)':'Pendente / Faltante'
+    ]),
+    `Total: ${espFiltrados.length} bem(ns) listados`
+  );
+}
 async function finalizarInv(){
   if(fila.length&&!confirm(`Há ${fila.length} bem(ns) na fila ainda não confirmados. Finalizar assim mesmo? Eles ficarão como faltantes.`))return;
   if(!sess.length&&!confirm('Nenhum bem foi conferido. Finalizar mesmo assim (todos ficarão como faltantes)?'))return;
-  const mk=$('#mk').checked;if(!curConf)curConf=await Repo.rpc('iniciar_conferencia',{p_local:invLocal,p_tipo:'Inventário'});
-  await Repo.rpc('finalizar_conferencia',{p_conf:curConf,p_marcar:mk});
-  const id=curConf;curConf=null;sess=[];await reload();$('#res').innerHTML='';invList();goConf=true;showConf(id)}
+  const mk=$('#mk')&&$('#mk').checked;
+
+  if(isAppOnline){
+    try{
+      if(!curConf)curConf=await Repo.rpc('iniciar_conferencia',{p_local:invLocal,p_tipo:'Inventário'});
+      await Repo.rpc('finalizar_conferencia',{p_conf:curConf,p_marcar:mk});
+      const id=curConf;curConf=null;sess=[];await reload();$('#res').innerHTML='';invList();goConf=true;showConf(id);
+      return;
+    }catch(e){
+      if(isNetworkError(e)){
+        await finalizarInvOffline();
+        return;
+      }
+      alert('Erro ao finalizar inventário no servidor: '+(e.message||e));
+    }
+  }else{
+    await finalizarInvOffline();
+  }
+}
+
+async function finalizarInvOffline(){
+  const mk=!!($('#mk')&&$('#mk').checked);
+  const nowIso=new Date().toISOString();
+
+  if(!curConf||!String(curConf).startsWith('off_')){
+    curConf='off_'+uid();
+    const newConf={
+      id:curConf,
+      local_id:invLocal,
+      tipo:'Inventário',
+      usuario_email:ME.email,
+      iniciada_em:nowIso,
+      finalizada_em:null,
+      marcar_faltantes:false,
+      total_esperado:S.bens.filter(x=>x.local_id===invLocal&&x.status!=='Baixado').length,
+      is_offline:true,
+      itens:[]
+    };
+    saveOfflineConference(newConf);
+  }
+
+  const offConf=getOfflineConferences().find(c=>c.id===curConf);
+  if(!offConf)return;
+
+  const esp=S.bens.filter(b=>b.local_id===invLocal&&b.status!=='Baixado');
+  const conferidosSet=new Set(offConf.itens.map(i=>i.bem_id));
+
+  esp.forEach(b=>{
+    if(!conferidosSet.has(b.id)){
+      offConf.itens.push({
+        id:uid(),
+        conferencia_id:curConf,
+        bem_id:b.id,
+        resultado:'Faltante',
+        local_encontrado_id:null,
+        data:nowIso,
+        mover:false
+      });
+      if(mk){
+        b.status='Não localizado';
+      }
+    }
+  });
+
+  offConf.finalizada_em=nowIso;
+  offConf.marcar_faltantes=mk;
+  saveOfflineConference(offConf);
+  saveCacheData(S);
+  mergeOfflineConferencesIntoState();
+  updateOnlineBadge();
+
+  const id=curConf;
+  curConf=null;sess=[];fila=[];
+  $('#res').innerHTML=`<div class="card ok">✔ <b>Inventário finalizado offline com sucesso!</b><br>Os dados foram salvos neste aparelho. Quando reconectar à internet, envie pelo botão <b>Sincronizar</b>.</div>`;
+  invList();
+  goConf=true;
+  showConf(id);
+}
+
 const confTot=c=>{const it=(S.conferencia_itens||[]).filter(i=>i.conferencia_id===c.id),n=r=>it.filter(i=>i.resultado===r).length;return{ok:it.length-n('Faltante'),falt:n('Faltante'),div:n('Local divergente')+n('Movido'),it}};
+
 function confs(){
   const r=[...(S.conferencias||[])].sort((a,b)=>a.iniciada_em<b.iniciada_em?1:-1);
-  $('#main').innerHTML=`<div class="card tw"><table><tr><th>Data</th><th>Tipo</th><th>Local</th><th>Responsável</th><th>Conferidos</th><th>Faltantes</th><th>Divergentes</th><th></th></tr>
-  ${r.map(c=>{const t=confTot(c);return `<tr><td>${new Date(c.iniciada_em).toLocaleString('pt-BR')}${c.finalizada_em?'':' <span class="tag warn">em andamento</span>'}</td><td>${esc(c.tipo)}</td><td>${esc(L(c.local_id))}</td><td>${esc(c.usuario_email)}</td><td>${t.ok}</td><td class="${t.falt?'warn':''}">${t.falt}</td><td>${t.div}</td><td><button class="sm" onclick="showConf('${c.id}')">Detalhes</button> <button class="sm" onclick="imprimirConf('${c.id}')">Imprimir</button>${adm()?` <button class="sm bad" onclick="delConf('${c.id}')">Excluir</button>`:''}</td></tr>`}).join('')||'<tr><td colspan="8" class="mut">Nenhuma conferência registrada.</td></tr>'}</table></div>`}
-function imprimirConf(id){
-  const c=S.conferencias.find(x=>x.id===id),t=confTot(c),fmt=v=>v?new Date(v).toLocaleString('pt-BR'):'—';
+  const total=r.length,totalPages=Math.max(1,Math.ceil(total/perConf));
+  pageConf=Math.min(Math.max(1,pageConf),totalPages);
+  const slice=r.slice((pageConf-1)*perConf,pageConf*perConf);
+  const pendQtd=getOfflineConferences().length;
+
+  $('#main').innerHTML=`${pendQtd?`<div class="card warn" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+    <span>⚠ <b>${pendQtd} conferência(s) realizada(s) offline</b> salva(s) no aparelho pendente(s) de sincronização.</span>
+    <button class="pri sm" ${isSyncing?'disabled':''} onclick="syncOfflineConferences()">${isSyncing?'Sincronizando…':'⬆ Sincronizar Tudo com o Banco'}</button>
+  </div>`:''}<div class="card tw"><table><tr><th>Data</th><th>Tipo</th><th>Local</th><th>Responsável</th><th>Conferidos</th><th>Faltantes</th><th>Divergentes</th><th></th></tr>
+  ${slice.map(c=>{const t=confTot(c);
+    const permitidos=adm()?S.locais:userLocais();
+    const temPermissaoLocal=!c.local_id||permitidos.some(l=>l.id===c.local_id);
+    const tagOff=c.is_offline?' <span class="tag warn" title="Realizada offline">Offline (Pendente)</span>':'';
+    const tagPerm=c.is_offline&&!temPermissaoLocal?' <span class="tag err" title="Sem permissão no banco para este local">Sem permissão</span>':'';
+    const tagProg=c.finalizada_em?'':' <span class="tag warn">em andamento</span>';
+    return `<tr><td>${new Date(c.iniciada_em).toLocaleString('pt-BR')}${tagOff}${tagPerm}${tagProg}</td><td>${esc(c.tipo)}</td><td>${esc(L(c.local_id))}</td><td>${esc(c.usuario_email||'—')}</td><td>${t.ok}</td><td class="${t.falt?'warn':''}">${t.falt}</td><td>${t.div}</td><td><button class="sm" onclick="showConf('${c.id}')">Detalhes</button> <button class="sm" onclick="imprimirConf('${c.id}')">Imprimir</button>${c.is_offline?` <button class="sm pri" ${isSyncing?'disabled':''} onclick="syncOfflineConferences('${c.id}')">⬆ Sincronizar</button> <button class="sm bad" onclick="delOfflineConf('${c.id}')">Excluir</button>`:(adm()?` <button class="sm bad" onclick="delConf('${c.id}')">Excluir</button>`:'')}</td></tr>`
+  }).join('')||'<tr><td colspan="8" class="mut">Nenhuma conferência registrada.</td></tr>'}</table>
+  ${paginacao(total,pageConf,perConf,'conf')}</div>`}
+
+function imprimirConf(id, catFiltro = ''){
+  const c=S.conferencias.find(x=>x.id===id);if(!c)return;
+  const t=confTot(c),fmt=v=>v?new Date(v).toLocaleString('pt-BR'):'—';
   const bem=i=>S.bens.find(x=>x.id===i.bem_id)||{};
-  const rows=[...t.it].sort((a,b)=>String(bem(a).tombo||'').localeCompare(String(bem(b).tombo||''),'pt-BR',{numeric:true}));
-  $('#printarea').innerHTML=`<div class="rep"><h2>Conferência — ${esc(c.tipo)}</h2><div style="color:#444">Controle de Patrimônio</div>
-  <table><tr><th style="width:22%">Local</th><td>${esc(L(c.local_id))}</td><th style="width:18%">Responsável</th><td>${esc(c.usuario_email||'—')}</td></tr>
+  const itens=catFiltro?t.it.filter(i=>(((bem(i).categoria||'').trim()||'Sem categoria')===catFiltro)):t.it;
+  const nOk=itens.filter(i=>i.resultado==='Presente').length;
+  const nFalt=itens.filter(i=>i.resultado==='Faltante').length;
+  const nDiv=itens.filter(i=>i.resultado==='Local divergente'||i.resultado==='Movido').length;
+  const rows=[...itens].sort((a,b)=>String(bem(a).tombo||'').localeCompare(String(bem(b).tombo||''),'pt-BR',{numeric:true}));
+  $('#printarea').innerHTML=`<div class="rep"><h2>Conferência — ${esc(c.tipo)} ${c.is_offline?'(Offline)':''}</h2>
+  <div style="color:#444">Controle de Patrimônio ${catFiltro?'· Categoria: <b>'+esc(catFiltro)+'</b> ('+rows.length+' bens)':''}</div>
+  <table><tr><th style="width:20%">Local</th><td>${esc(L(c.local_id))}</td><th style="width:20%">Responsável</th><td>${esc(c.usuario_email||'—')}</td></tr>
   <tr><th>Início</th><td>${fmt(c.iniciada_em)}</td><th>Término</th><td>${c.finalizada_em?fmt(c.finalizada_em):'Em andamento'}</td></tr>
-  <tr><th>Bens esperados</th><td>${c.total_esperado||0}</td><th>Conferidos</th><td>${t.ok}</td></tr>
-  <tr><th>Faltantes</th><td>${t.falt}</td><th>Divergentes / movidos</th><td>${t.div}</td></tr></table>
-  <table><tr><th style="width:5%">Nº</th><th>Tombo</th><th>Descrição</th><th>Resultado</th><th>Observação</th><th>Hora</th></tr>
-  ${rows.map((i,n)=>`<tr><td>${n+1}</td><td><b>${esc(bem(i).tombo)}</b></td><td>${esc(bem(i).descricao)}</td><td>${esc(i.resultado)}</td><td>${esc(i.obs)}</td><td>${new Date(i.data).toLocaleTimeString('pt-BR')}</td></tr>`).join('')||'<tr><td colspan="6">Sem itens.</td></tr>'}</table>
+  <tr><th>Filtro de Categoria</th><td>${catFiltro?esc(catFiltro):'Todas as categorias'}</td><th>Total de itens</th><td>${rows.length} ${catFiltro?'de '+t.it.length:''}</td></tr>
+  <tr><th>Conferidos / Presentes</th><td>${nOk}</td><th>Faltantes</th><td>${nFalt}</td></tr>
+  <tr><th>Divergentes / Movidos</th><td colspan="3">${nDiv}</td></tr></table>
+  <table><tr><th style="width:5%">Nº</th><th>Tombo</th><th>Descrição</th><th>Categoria</th><th>Resultado</th><th>Observação</th><th>Hora</th></tr>
+  ${rows.map((i,n)=>{const b=bem(i);return `<tr><td>${n+1}</td><td><b>${esc(b.tombo)}</b></td><td>${esc(b.descricao)}</td><td>${esc(b.categoria||'Sem categoria')}</td><td>${esc(i.resultado)}</td><td>${esc(i.obs)}</td><td>${new Date(i.data).toLocaleTimeString('pt-BR')}</td></tr>`}).join('')||'<tr><td colspan="7">Sem itens.</td></tr>'}</table>
   <div class="sig"><div>Responsável pela conferência</div><div>Responsável pelo local</div></div>
   <div style="margin-top:14px;font-size:10px;color:#555">Emitido em ${new Date().toLocaleString('pt-BR')}</div></div>`;
-  printNow('Conferencia')}
+  printNow('Conferencia'+(catFiltro?'-'+catFiltro:''))}
+
 const RES=['Presente','Local divergente','Movido','Faltante'];
-function showConf(id){const c=S.conferencias.find(x=>x.id===id),t=confTot(c);
-  $('#dlg').innerHTML=`<h3 style="margin-top:0">Conferência — ${esc(c.tipo)}</h3><p class="mut">${esc(L(c.local_id))} · ${new Date(c.iniciada_em).toLocaleString('pt-BR')} · ${esc(c.usuario_email)}<br>${t.ok} conferidos · ${t.falt} faltantes · ${t.div} divergentes</p>
-  <div class="tw"><table><tr><th>Tombo</th><th>Descrição</th><th>Resultado</th><th>Obs.</th><th>Hora</th>${adm()?'<th></th>':''}</tr>${t.it.map(i=>{const b=S.bens.find(x=>x.id===i.bem_id)||{};return `<tr><td><b>${esc(b.tombo)}</b></td><td>${esc(b.descricao)}</td><td class="${i.resultado==='Faltante'?'err':i.resultado==='Presente'?'ok':'warn'}">${esc(i.resultado)}</td><td>${esc(i.obs)}</td><td>${new Date(i.data).toLocaleTimeString('pt-BR')}</td>${adm()?`<td><button class="sm" onclick="editItem('${id}','${i.id}')">Editar</button> <button class="sm bad" onclick="delItem('${id}','${i.id}')">Excluir</button></td>`:''}</tr>`}).join('')||'<tr><td colspan="6" class="mut">Sem itens.</td></tr>'}</table></div>
-  <div class="row" style="justify-content:flex-end;margin-top:10px">${adm()?`<button class="bad" onclick="delConf('${id}')">Excluir conferência</button>`:''}<button class="pri" onclick="imprimirConf('${id}')">🖨 Imprimir / PDF</button><button onclick="$('#dlg').close()">Fechar</button></div>`;if(!$('#dlg').open)$('#dlg').showModal()}
+let confCatFiltro = '', curConfId = '';
+function showConf(id, cat = null){
+  if(curConfId!==id){curConfId=id;confCatFiltro='';pageConfItens=1}
+  if(cat!==null){confCatFiltro=cat;pageConfItens=1}
+  const c=S.conferencias.find(x=>x.id===id);if(!c)return;
+  const t=confTot(c);
+  const bem=i=>S.bens.find(x=>x.id===i.bem_id)||{};
+  const catMap={};
+  t.it.forEach(i=>{const b=bem(i);const k=(b.categoria||'').trim()||'Sem categoria';catMap[k]=(catMap[k]||0)+1});
+  const catList=Object.keys(catMap).sort((a,b)=>a.localeCompare(b,'pt-BR')).map(k=>({nome:k,qtd:catMap[k]}));
+  const itens=confCatFiltro?t.it.filter(i=>(((bem(i).categoria||'').trim()||'Sem categoria')===confCatFiltro)):t.it;
+  const nOk=itens.filter(i=>i.resultado==='Presente').length;
+  const nFalt=itens.filter(i=>i.resultado==='Faltante').length;
+  const nDiv=itens.filter(i=>i.resultado==='Local divergente'||i.resultado==='Movido').length;
+
+  const totalItens=itens.length;
+  const totalPages=Math.max(1,Math.ceil(totalItens/perConfItens));
+  pageConfItens=Math.min(Math.max(1,pageConfItens),totalPages);
+  const sliceItens=itens.slice((pageConfItens-1)*perConfItens,pageConfItens*perConfItens);
+  const permitidos=adm()?S.locais:userLocais();
+  const temPermissaoLocal=!c.local_id||permitidos.some(l=>l.id===c.local_id);
+
+  $('#dlg').innerHTML=`${c.is_offline?`<div class="card warn" style="margin:0 0 12px;padding:10px 14px;border-left:4px solid ${temPermissaoLocal?'var(--warn)':'var(--bad)'}">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+      <div>
+        <b>📡 Conferência realizada no Modo Offline</b><br>
+        <span style="font-size:12px">Salva com segurança neste aparelho. Envie para o banco de dados quando houver conexão.</span>
+        ${!temPermissaoLocal?`<br><span class="err" style="font-size:12.5px;font-weight:600">⚠ Seu usuário não possui permissão para o local "${esc(L(c.local_id))}". Clique em "Alterar Local" antes de sincronizar.</span>`:''}
+      </div>
+      <div style="display:flex;gap:6px">
+        <button class="sm" onclick="mudarLocalConfOffline('${id}')">✏ Alterar Local</button>
+        <button class="pri sm" ${isSyncing?'disabled':''} onclick="syncOfflineConferences('${id}')">${isSyncing?'Sincronizando…':'⬆ Sincronizar com o banco'}</button>
+      </div>
+    </div>
+  </div>`:''}
+  <div class="row" style="justify-content:space-between;align-items:center;flex-wrap:nowrap">
+    <h3 style="margin:0">Conferência — ${esc(c.tipo)} ${c.is_offline?'(Offline)':''}</h3>
+    <span class="tag">${itens.length} de ${t.it.length} itens</span>
+  </div>
+  <p class="mut" style="margin:4px 0 10px">Local: <b>${esc(L(c.local_id))}</b> ${c.is_offline?`<button class="sm" onclick="mudarLocalConfOffline('${id}')" style="margin-left:6px;padding:2px 8px;font-size:12px">✏ Alterar Local</button>`:''}${!temPermissaoLocal?' <span class="err" style="font-size:12px;font-weight:bold">(Sem permissão)</span>':''} · ${new Date(c.iniciada_em).toLocaleString('pt-BR')} · ${esc(c.usuario_email)}<br>
+  <b>${nOk}</b> presentes · <b class="${nFalt?'warn':'ok'}">${nFalt}</b> faltantes · <b>${nDiv}</b> divergentes${confCatFiltro?` (na categoria <i>${esc(confCatFiltro)}</i>)`:''}</p>
+  
+  <div class="row" style="align-items:center;margin-bottom:10px;gap:8px">
+    <label style="margin:0;font-weight:600;white-space:nowrap">Filtrar por Categoria:</label>
+    <select id="confCatSel" style="flex:1">
+      <option value="">Todas as categorias (${t.it.length} itens)</option>
+      ${catList.map(x=>`<option value="${esc(x.nome)}" ${x.nome===confCatFiltro?'selected':''}>${esc(x.nome)} (${x.qtd} item${x.qtd>1?'s':''})</option>`).join('')}
+    </select>
+    ${confCatFiltro?`<button class="sm" id="confCatClear">Ver todas</button>`:''}
+  </div>
+
+  <div class="tw" style="max-height:50vh;overflow-y:auto"><table>
+    <tr><th>Tombo</th><th>Descrição</th><th>Categoria</th><th>Resultado</th><th>Obs.</th><th>Hora</th>${adm()?'<th></th>':''}</tr>
+    ${sliceItens.map(i=>{const b=bem(i);return `<tr><td><b>${esc(b.tombo)}</b></td><td>${esc(b.descricao)}</td><td><span class="tag">${esc(b.categoria||'Sem categoria')}</span></td><td class="${i.resultado==='Faltante'?'err':(i.resultado==='Presente'?'ok':'warn')}">${esc(i.resultado)}</td><td>${esc(i.obs)}</td><td>${new Date(i.data).toLocaleTimeString('pt-BR')}</td>${adm()?`<td><button class="sm" onclick="editItem('${id}','${i.id}')">Editar</button> <button class="sm bad" onclick="delItem('${id}','${i.id}')">Excluir</button></td>`:''}</tr>`}).join('')||'<tr><td colspan="'+(adm()?7:6)+'" class="mut">Nenhum item nesta categoria.</td></tr>'}
+  </table></div>
+  ${paginacao(totalItens,pageConfItens,perConfItens,'confItens')}
+
+  <div class="row" style="justify-content:space-between;align-items:center;margin-top:12px">
+    <div>${c.is_offline?`<button class="bad" onclick="delOfflineConf('${id}')">Excluir conferência offline</button>`:(adm()?`<button class="bad" onclick="delConf('${id}')">Excluir conferência</button>`:'')}</div>
+    <div style="display:flex;gap:8px">
+      ${c.is_offline?`<button class="pri" ${isSyncing?'disabled':''} onclick="syncOfflineConferences('${id}')">${isSyncing?'Sincronizando…':'⬆ Sincronizar'}</button>`:''}
+      <button onclick="imprimirConf('${id}', confCatFiltro)">🖨 Imprimir ${confCatFiltro?'categoria ('+esc(confCatFiltro)+')':'todos'}</button>
+      <button onclick="$('#dlg').close()">Fechar</button>
+    </div>
+  </div>`;
+
+  $('#confCatSel').onchange=e=>{showConf(id, e.target.value)};
+  if($('#confCatClear'))$('#confCatClear').onclick=()=>{showConf(id, '')};
+  if(!$('#dlg').open)$('#dlg').showModal()}
+
+function dialogAlterarLocalConf(conf, permitidos){
+  return new Promise((resolve) => {
+    let d = $('#dlgAlterarLocal');
+    if(!d){
+      d = document.createElement('dialog');
+      d.id = 'dlgAlterarLocal';
+      d.style.zIndex = '9999';
+      document.body.appendChild(d);
+    }
+    d.innerHTML = `
+      <div style="padding:4px">
+        <h3 style="margin:0 0 8px">✏ Alterar Local do Inventário Offline</h3>
+        <p style="font-size:13.5px;color:var(--tx);margin:0 0 10px">
+          Local atualmente gravado: <b>${esc(L(conf.local_id))}</b>
+        </p>
+        <p style="font-size:13px;color:var(--mut);margin:0 0 12px">
+          Selecione a secretaria/local correta para a qual esta conferência (${(conf.itens||[]).length} itens) deve ser atribuída:
+        </p>
+        <div style="margin-bottom:14px">
+          <label>Selecione seu local autorizado:</label>
+          <select id="selNovoLocal">
+            ${permitidos.map(l => `<option value="${l.id}" ${l.id === conf.local_id ? 'selected' : ''}>${esc(l.nome)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="row" style="justify-content:flex-end;gap:8px">
+          <button id="btnCancelAltLocal">Cancelar</button>
+          <button class="pri" id="btnConfAltLocal">Confirmar Local</button>
+        </div>
+      </div>
+    `;
+    $('#btnCancelAltLocal').onclick = () => { d.close(); resolve(null); };
+    $('#btnConfAltLocal').onclick = () => {
+      const val = $('#selNovoLocal').value;
+      d.close();
+      resolve(val);
+    };
+    d.showModal();
+  });
+}
+
+async function mudarLocalConfOffline(id){
+  const conf = getOfflineConferences().find(c => c.id === id);
+  if(!conf) return;
+  const permitidos = adm() ? S.locais : userLocais();
+  if(!permitidos.length){
+    alert('Seu usuário não possui nenhuma secretaria atribuída. Solicite a um administrador para vincular seu acesso na tela de Usuários.');
+    return;
+  }
+  const novoLocal = await dialogAlterarLocalConf(conf, permitidos);
+  if(novoLocal && novoLocal !== conf.local_id){
+    conf.local_id = novoLocal;
+    conf.total_esperado = S.bens.filter(x => x.local_id === novoLocal && x.status !== 'Baixado').length;
+    (conf.itens || []).forEach(it => {
+      if(it.resultado === 'Presente') it.local_encontrado_id = novoLocal;
+    });
+    saveOfflineConference(conf);
+    mergeOfflineConferencesIntoState();
+    showConf(id);
+    alert(`Local atualizado com sucesso para: ${L(novoLocal)}.\nAgora você pode sincronizar.`);
+  }
+}
+
+async function ensureOnlineAuth(interactive = false){
+  if(!isAppOnline) return false;
+  try {
+    const { data: { session }, error } = await sb.auth.getSession();
+    if(session && session.user && (!ME || session.user.id === ME.id)){
+      if(session.expires_at && (session.expires_at * 1000 - Date.now() < 60000)){
+        const refreshed = await sb.auth.refreshSession().catch(()=>null);
+        if(refreshed && refreshed.data && refreshed.data.session) return true;
+      } else {
+        return true;
+      }
+    } else {
+      const refreshed = await sb.auth.refreshSession().catch(()=>null);
+      if(refreshed && refreshed.data && refreshed.data.session && (!ME || refreshed.data.session.user.id === ME.id)){
+        return true;
+      }
+    }
+  } catch(e) {
+    console.warn('Erro ao verificar sessão Supabase:', e);
+  }
+
+  if(!interactive) return false;
+
+  return new Promise((resolve) => {
+    const email = (ME && ME.email) || '';
+    let d = $('#dlgAuth');
+    if(!d){
+      d = document.createElement('dialog');
+      d.id = 'dlgAuth';
+      d.style.zIndex = '9999';
+      document.body.appendChild(d);
+    }
+    d.innerHTML = `
+      <div style="padding:4px">
+        <h3 style="margin:0 0 8px">🔒 Reautenticação necessária</h3>
+        <p style="font-size:13.5px;color:var(--mut);margin:0 0 12px">
+          Sua conexão com a internet foi restabelecida. Para sincronizar o inventário com segurança no banco de dados, confirme a senha de <b>${esc(email)}</b>:
+        </p>
+        <div style="margin-bottom:12px">
+          <label>Senha de acesso</label>
+          <input type="password" id="syncPw" placeholder="Digite sua senha" autocomplete="current-password">
+          <p id="syncPwErr" class="err" style="margin:6px 0 0;font-size:13px"></p>
+        </div>
+        <div class="row" style="justify-content:flex-end;gap:8px">
+          <button id="btnCancelSyncPw">Cancelar</button>
+          <button class="pri" id="syncPwBtn">Entrar e Sincronizar</button>
+        </div>
+      </div>
+    `;
+    const doLogin = async () => {
+      const pw = ($('#syncPw').value || '').trim();
+      if(!pw){
+        $('#syncPwErr').textContent = 'Informe sua senha.';
+        return;
+      }
+      const btn = $('#syncPwBtn');
+      if(btn){ btn.disabled = true; btn.textContent = 'Autenticando…'; }
+      $('#syncPwErr').textContent = '';
+      try {
+        const { data, error } = await sb.auth.signInWithPassword({ email, password: pw });
+        if(error) throw error;
+        const { data: perfil } = await sb.from('perfis').select('*').eq('id', data.user.id).maybeSingle();
+        if(perfil && perfil.ativo){
+          ME = perfil;
+          setActiveProfile(perfil);
+          const h = await hashCred(email, pw);
+          saveOfflineUser(email, h, perfil);
+        }
+        d.close();
+        resolve(true);
+      } catch(err) {
+        if(btn){ btn.disabled = false; btn.textContent = 'Entrar e Sincronizar'; }
+        $('#syncPwErr').textContent = 'Erro ao autenticar: ' + (err.message || err);
+      }
+    };
+    $('#btnCancelSyncPw').onclick = () => { d.close(); resolve(false); };
+    $('#syncPwBtn').onclick = doLogin;
+    $('#syncPw').onkeydown = e => { if(e.key === 'Enter') doLogin(); };
+    d.showModal();
+    setTimeout(() => { const el = $('#syncPw'); if(el) el.focus(); }, 100);
+  });
+}
+
 function editItem(cid,iid){if(!adm())return;const i=S.conferencia_itens.find(x=>x.id===iid),b=S.bens.find(x=>x.id===i.bem_id)||{};
   $('#dlg').innerHTML=`<h3 style="margin-top:0">Editar item — ${esc(b.tombo)}</h3><p class="mut">${esc(b.descricao)}</p>
   <div class="g2"><div><label>Resultado</label><select id="ir">${RES.map(r=>`<option ${i.resultado===r?'selected':''}>${r}</option>`).join('')}</select></div><div><label>Observação</label><input id="io" value="${esc(i.obs)}"></div></div>
@@ -556,15 +1734,145 @@ function editItem(cid,iid){if(!adm())return;const i=S.conferencia_itens.find(x=>
   <div class="row" style="justify-content:flex-end"><button onclick="showConf('${cid}')">Voltar</button><button class="pri" onclick="saveItem('${cid}','${iid}')">Salvar</button></div>`}
 async function saveItem(cid,iid){const i=S.conferencia_itens.find(x=>x.id===iid);await Repo.upsert('conferencia_itens',{...i,resultado:$('#ir').value,obs:$('#io').value.trim()||null});await reload();showConf(cid)}
 async function delItem(cid,iid){if(!confirm('Excluir este item da conferência?'))return;await Repo.remove('conferencia_itens',iid);await reload();showConf(cid)}
-async function delConf(id){if(!confirm('Excluir esta conferência e todos os seus itens? As datas de última conferência dos bens não serão alteradas.'))return;
+async function delConf(id){
+  const c=S.conferencias.find(x=>x.id===id);
+  if(c&&c.is_offline)return delOfflineConf(id);
+  if(!confirm('Excluir esta conferência e todos os seus itens? As datas de última conferência dos bens não serão alteradas.'))return;
   await Repo.remove('conferencias',id);await reload();$('#dlg').close();render()}
+
+function delOfflineConf(id){
+  if(!confirm('Excluir esta conferência offline pendente? Os registros dela salvos no aparelho serão apagados.'))return;
+  removeOfflineConference(id);
+  mergeOfflineConferencesIntoState();
+  updateOnlineBadge();
+  $('#dlg').close();
+  if(view==='conf')confs();else render();
+}
+
+async function syncOfflineConferences(targetId=null){
+  if(isSyncing)return;
+  const list=getOfflineConferences();
+  if(!list.length){
+    alert('Nenhuma conferência offline pendente de sincronização.');
+    return;
+  }
+  const online=await checkRealConnection();
+  if(!online){
+    alert('Sem conexão com a internet ou servidor indisponível. Conecte-se e tente novamente.');
+    return;
+  }
+
+  // 1. Garante que o Supabase possui sessão autenticada ativa com JWT válido
+  const authOk = await ensureOnlineAuth(true);
+  if(!authOk){
+    return;
+  }
+
+  isSyncing=true;
+  updateOnlineBadge();
+
+  const toSync=targetId?list.filter(c=>c.id===targetId):[...list];
+  let confsOk=0,itensOk=0,falhas=0,lastError='';
+
+  for(const conf of toSync){
+    try{
+      // 2. Valida se o usuário tem permissão para o local desta conferência
+      const permitidos = adm() ? S.locais : userLocais();
+      let localId = conf.local_id;
+
+      if(!permitidos.some(l => l.id === localId)){
+        const nomeAntigo = L(localId);
+        if(!permitidos.length){
+          throw new Error(`Seu usuário (${ME.email}) não possui permissão para o local "${nomeAntigo}" e nenhuma secretaria foi vinculada ao seu perfil. Solicite a um administrador para liberar seu acesso.`);
+        }
+        const novoLocal = await dialogAlterarLocalConf(conf, permitidos);
+        if(!novoLocal){
+          throw new Error(`Sincronização cancelada para "${nomeAntigo}": local sem permissão.`);
+        }
+        localId = novoLocal;
+        conf.local_id = novoLocal;
+        (conf.itens || []).forEach(it => { if(it.resultado === 'Presente') it.local_encontrado_id = novoLocal; });
+        saveOfflineConference(conf);
+      }
+
+      if(!localId){
+        throw new Error('Local da conferência não definido.');
+      }
+
+      const serverConfId=await Repo.rpc('iniciar_conferencia',{
+        p_local:localId,
+        p_tipo:conf.tipo||'Inventário'
+      });
+      if(!serverConfId)throw new Error('Falha ao iniciar conferência no banco.');
+
+      const presentes=(conf.itens||[]).filter(i=>i.resultado!=='Faltante');
+      for(const it of presentes){
+        await Repo.rpc('conferir_bem',{
+          p_bem:it.bem_id,
+          p_local:localId,
+          p_mover:!!it.mover,
+          p_conf:serverConfId
+        });
+        itensOk++;
+      }
+
+      if(conf.finalizada_em){
+        await Repo.rpc('finalizar_conferencia',{
+          p_conf:serverConfId,
+          p_marcar:!!conf.marcar_faltantes
+        });
+      }
+
+      removeOfflineConference(conf.id);
+      confsOk++;
+    }catch(e){
+      console.error('Erro na sincronização:',e);
+      falhas++;
+      lastError=e.message||String(e);
+      break;
+    }
+  }
+
+  isSyncing=false;
+  await refresh();
+
+  if(confsOk>0&&falhas===0){
+    alert(`🎉 Sincronização concluída com sucesso!\n\n${confsOk} conferência(s) e ${itensOk} item(ns) gravados no banco de dados.`);
+  }else if(confsOk>0&&falhas>0){
+    alert(`Sincronização parcial:\n${confsOk} conferência(s) enviada(s), mas ocorreu erro na seguinte:\n${lastError}\n\nOs itens pendentes continuam salvos no aparelho.`);
+  }else{
+    alert(`Não foi possível sincronizar:\n${lastError||'Erro desconhecido'}\n\nOs dados continuam salvos no aparelho.`);
+  }
+
+  if(view==='conf')confs();
+}
+
+async function autoSyncIfOnline(){
+  const list=getOfflineConferences();
+  if(list.length&&!isSyncing&&isAppOnline){
+    const authOk = await ensureOnlineAuth(false);
+    if(authOk){
+      console.log('Online detectado e autenticado: tentando sincronizar conferências offline pendentes...');
+      await syncOfflineConferences();
+    }
+  }
+}
 
 /* ======== ETIQUETAS ======== */
 let FL={l:'',g:'',e:''};
 function labels(){
   const r=S.bens.filter(b=>b.status!=='Baixado'&&matchEst(b,FL));
-  $('#main').innerHTML=`<div class="card"><div class="g2">${cascata('el',{s:FL.l,g:FL.g,e:FL.e},FOPT)}</div><div class="row" style="margin-top:10px"><button class="pri" id="ep">🖨 Imprimir selecionadas</button></div></div><div class="card"><div class="labels" id="lb">${r.map(b=>`<label class="lbl" style="cursor:pointer;margin:0"><input type="checkbox" value="${b.id}" checked style="width:auto"><div class="qr">${qrSvg(b.tombo)}</div><b>${esc(b.tombo)}</b>${esc(b.descricao).slice(0,32)}</label>`).join('')||'<span class="mut">Sem bens.</span>'}</div></div>`;
-  $('#els').onchange=e=>{FL.l=e.target.value;FL.g='';FL.e='';labels()};$('#elg').onchange=e=>{FL.g=e.target.value;FL.e='';labels()};$('#ele').onchange=e=>{FL.e=e.target.value;labels()};
+  const total=r.length,totalPages=Math.max(1,Math.ceil(total/perLabels));
+  pageLabels=Math.min(Math.max(1,pageLabels),totalPages);
+  const slice=r.slice((pageLabels-1)*perLabels,pageLabels*perLabels);
+  $('#main').innerHTML=`<div class="card"><div class="g2">${cascata('el',{s:FL.l,g:FL.g,e:FL.e},FOPT)}</div>
+  <div class="row" style="margin-top:10px;gap:8px"><button class="pri" id="ep">🖨 Imprimir selecionadas</button><button class="sm" onclick="toggleSelLabels(true)">Marcar todas da página</button><button class="sm" onclick="toggleSelLabels(false)">Desmarcar todas</button></div>
+  <p class="mut" style="margin:8px 0 0;font-size:13px">${total} bem(ns) encontrado(s).</p></div>
+  <div class="card"><div class="labels" id="lb">${slice.map(b=>`<label class="lbl" style="cursor:pointer;margin:0"><input type="checkbox" value="${b.id}" checked style="width:auto"><div class="qr">${qrSvg(b.tombo)}</div><b>${esc(b.tombo)}</b>${esc(b.descricao).slice(0,32)}</label>`).join('')||'<span class="mut">Sem bens.</span>'}</div>
+  ${paginacao(total,pageLabels,perLabels,'labels')}</div>`;
+  $('#els').onchange=e=>{FL.l=e.target.value;FL.g='';FL.e='';pageLabels=1;labels()};
+  $('#elg').onchange=e=>{FL.g=e.target.value;FL.e='';pageLabels=1;labels()};
+  $('#ele').onchange=e=>{FL.e=e.target.value;pageLabels=1;labels()};
   $('#ep').onclick=()=>{const ids=[...document.querySelectorAll('#lb input:checked')].map(i=>i.value);ids.length&&printLabels(ids)}}
 
 /* ======== RELATÓRIOS E HISTÓRICO DE MOVIMENTAÇÕES ======== */
@@ -574,9 +1882,10 @@ function relatorio(titulo,sub,cols,rows,rodape){
   <table><tr>${cols.map(c=>`<th>${esc(c)}</th>`).join('')}</tr>${rows.map(r=>`<tr>${r.map(c=>`<td>${esc(c??'')}</td>`).join('')}</tr>`).join('')||`<tr><td colspan="${cols.length}">Nenhum registro.</td></tr>`}</table>
   <div style="margin-top:12px;font-size:11px;color:#333">${esc(rodape||'')}</div><div style="margin-top:6px;font-size:10px;color:#555">Emitido em ${new Date().toLocaleString('pt-BR')} por ${esc(ME.email)}</div></div>`;printNow(titulo)}
 function imprimirBens(){const r=[...filtrados()].sort((a,b)=>(P(a.local_id,a.gerencia_id,a.equipamento_id)+'|'+a.tombo).localeCompare(P(b.local_id,b.gerencia_id,b.equipamento_id)+'|'+b.tombo,'pt-BR',{numeric:true}));
-  relatorio('Relatório de bens patrimoniais',txtEst(F.l,F.g,F.e)+(F.s?' · Status: '+F.s:'')+(F.q?' · Busca: '+F.q:''),
-    ['Tombo','Descrição','Secretaria','Gerência','Equipamento / Unidade','Status','Valor atual'],
-    r.map(b=>[b.tombo,b.descricao,b.local_id?L(b.local_id):'—',GN(b.gerencia_id)||'—',EN(b.equipamento_id)||'—',b.status,b.status==='Baixado'?'—':brl(deprec(b).atual)]),
+  const sub=[txtEst(F.l,F.g,F.e),F.c?(F.c==='_sem_'?'Sem categoria':'Categoria: '+F.c):'',F.s?'Status: '+F.s:'',F.q?'Busca: '+F.q:''].filter(Boolean).join(' · ');
+  relatorio('Relatório de bens patrimoniais',sub,
+    ['Tombo','Descrição','Categoria','Secretaria','Gerência','Equipamento / Unidade','Status','Valor atual'],
+    r.map(b=>[b.tombo,b.descricao,b.categoria||'Sem categoria',b.local_id?L(b.local_id):'—',GN(b.gerencia_id)||'—',EN(b.equipamento_id)||'—',b.status,b.status==='Baixado'?'—':brl(deprec(b).atual)]),
     `Total: ${r.length} bem(ns) · Valor contábil: ${brl(r.reduce((s,b)=>s+(b.status==='Baixado'?0:deprec(b).atual),0))}`)}
 let FH={q:'',t:'',l:'',g:'',e:'',de:'',ate:''};
 function hMov(){const bem=id=>S.bens.find(x=>x.id===id)||{},q=FH.q.toLowerCase(),lado=(s,g,e)=>matchEst({local_id:s,gerencia_id:g,equipamento_id:e},FH);
@@ -586,22 +1895,27 @@ function hMov(){const bem=id=>S.bens.find(x=>x.id===id)||{},q=FH.q.toLowerCase()
 const lado=(s,g,e)=>s?P(s,g,e):'—';
 function hist(){
   const bem=id=>S.bens.find(x=>x.id===id)||{},r=hMov(),tipos=[...new Set((S.movimentacoes||[]).map(m=>m.tipo).filter(Boolean))].sort();
+  const total=r.length,totalPages=Math.max(1,Math.ceil(total/perMov));
+  pageMov=Math.min(Math.max(1,pageMov),totalPages);
+  const slice=r.slice((pageMov-1)*perMov,pageMov*perMov);
   $('#main').innerHTML=`<div class="card"><div class="row"><input id="hq" placeholder="Buscar tombo ou descrição…" value="${esc(FH.q)}"><select id="ht"><option value="">Todos os tipos</option>${tipos.map(t=>`<option ${FH.t===t?'selected':''}>${esc(t)}</option>`).join('')}</select></div>
   <div class="g2" style="margin-top:8px">${cascata('hh',{s:FH.l,g:FH.g,e:FH.e},FOPT)}<div><label>De</label><input id="hde" type="date" value="${FH.de}"></div><div><label>Até</label><input id="hate" type="date" value="${FH.ate}"></div></div>
   <div class="row" style="margin-top:8px"><button onclick="imprimirHist()">🖨 Imprimir / PDF</button></div>
-  <p class="mut" style="margin:8px 0 0;font-size:13px">${r.length} movimentação(ões). O filtro de estrutura considera origem ou destino.</p></div>
-  <div class="card tw"><table><tr><th>Data e hora</th><th>Tombo</th><th>Bem</th><th>Tipo</th><th>Origem</th><th>Destino</th><th>Usuário</th><th>Obs.</th></tr>
-  ${r.slice(0,300).map(m=>`<tr><td>${fdt(m.data)}</td><td><b>${esc(bem(m.bem_id).tombo)}</b></td><td style="white-space:normal">${esc(bem(m.bem_id).descricao)}</td><td>${esc(m.tipo)}</td><td style="white-space:normal;min-width:170px">${esc(lado(m.de_local_id,m.de_gerencia_id,m.de_equipamento_id))}</td><td style="white-space:normal;min-width:170px">${esc(lado(m.para_local_id,m.para_gerencia_id,m.para_equipamento_id))}</td><td>${esc(m.usuario_email||'—')}</td><td style="white-space:normal">${esc(m.obs)}</td></tr>`).join('')||'<tr><td colspan="8" class="mut">Nenhuma movimentação.</td></tr>'}</table></div>
-  ${r.length>300?'<p class="mut">Mostrando as 300 mais recentes. Use os filtros ou imprima o relatório completo.</p>':''}`;
-  $('#hq').oninput=e=>{FH.q=e.target.value;clearTimeout(hist.t);hist.t=setTimeout(()=>{hist();const i=$('#hq');i.focus();i.setSelectionRange(FH.q.length,FH.q.length)},250)};
-  $('#ht').onchange=e=>{FH.t=e.target.value;hist()};
-  $('#hhs').onchange=e=>{FH.l=e.target.value;FH.g='';FH.e='';hist()};$('#hhg').onchange=e=>{FH.g=e.target.value;FH.e='';hist()};$('#hhe').onchange=e=>{FH.e=e.target.value;hist()};
-  $('#hde').onchange=e=>{FH.de=e.target.value;hist()};$('#hate').onchange=e=>{FH.ate=e.target.value;hist()}}
-function imprimirHist(){const bem=id=>S.bens.find(x=>x.id===id)||{},r=hMov();
-  relatorio('Histórico de movimentações patrimoniais',txtEst(FH.l,FH.g,FH.e)+(FH.t?' · Tipo: '+FH.t:'')+(FH.de||FH.ate?` · Período: ${FH.de?new Date(FH.de+'T12:00:00').toLocaleDateString('pt-BR'):'início'} a ${FH.ate?new Date(FH.ate+'T12:00:00').toLocaleDateString('pt-BR'):'hoje'}`:''),
-    ['Data e hora','Tombo','Bem','Tipo','Origem','Destino','Usuário','Obs.'],
-    r.map(m=>[fdt(m.data),bem(m.bem_id).tombo||'—',bem(m.bem_id).descricao||'—',m.tipo,lado(m.de_local_id,m.de_gerencia_id,m.de_equipamento_id),lado(m.para_local_id,m.para_gerencia_id,m.para_equipamento_id),m.usuario_email||'—',m.obs||'']),
-    `Total: ${r.length} movimentação(ões)`)}
+  <p class="mut" style="margin:8px 0 0;font-size:13px">${total} movimentação(ões). O filtro de estrutura considera origem ou destino.</p></div>
+  <div class="card tw"><table><tr><th>Data e hora</th><th>Tombo</th><th>Bem</th><th>Tipo</th><th>Origem</th><th>Destino</th><th>Usuário</th><th>Obs.</th>${adm()?'<th></th>':''}</tr>
+  ${slice.map(m=>`<tr><td>${fdt(m.data)}</td><td><b>${esc(bem(m.bem_id).tombo)}</b></td><td style="white-space:normal">${esc(bem(m.bem_id).descricao)}</td><td>${esc(m.tipo)}</td><td style="white-space:normal;min-width:170px">${esc(lado(m.de_local_id,m.de_gerencia_id,m.de_equipamento_id))}</td><td style="white-space:normal;min-width:170px">${esc(lado(m.para_local_id,m.para_gerencia_id,m.para_equipamento_id))}</td><td>${esc(m.usuario_email||'—')}</td><td style="white-space:normal">${esc(m.obs)}</td>${adm()?`<td><button class="sm bad" onclick="delMov('${m.id}')">Excluir</button></td>`:''}</tr>`).join('')||'<tr><td colspan="'+(adm()?9:8)+'" class="mut">Nenhuma movimentação.</td></tr>'}</table>
+  ${paginacao(total,pageMov,perMov,'mov')}</div>`;
+  $('#hq').oninput=e=>{FH.q=e.target.value;pageMov=1;clearTimeout(hist.t);hist.t=setTimeout(()=>{hist();const i=$('#hq');i.focus();i.setSelectionRange(FH.q.length,FH.q.length)},250)};
+  $('#ht').onchange=e=>{FH.t=e.target.value;pageMov=1;hist()};
+  $('#hhs').onchange=e=>{FH.l=e.target.value;FH.g='';FH.e='';pageMov=1;hist()};$('#hhg').onchange=e=>{FH.g=e.target.value;FH.e='';pageMov=1;hist()};$('#hhe').onchange=e=>{FH.e=e.target.value;pageMov=1;hist()};
+  $('#hde').onchange=e=>{FH.de=e.target.value;pageMov=1;hist()};$('#hate').onchange=e=>{FH.ate=e.target.value;pageMov=1;hist()}}
+async function delMov(id){
+  if(!adm())return;
+  if(!confirm('Excluir este registro de movimentação do histórico?'))return;
+  await Repo.remove('movimentacoes',id);
+  S.movimentacoes=await Repo.list('movimentacoes');
+  hist();
+}
 
 boot().catch(e=>{$('#app').innerHTML='<div class="card" id="login"><b class="err">Erro ao iniciar:</b><br>'+esc(e.message||e)+'<br><br><button onclick="location.reload()">Tentar de novo</button></div>'});
 </script>

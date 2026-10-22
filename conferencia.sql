@@ -36,6 +36,10 @@ language plpgsql security definer set search_path = public as $$
 declare v uuid;
 begin
   if not is_ativo() then raise exception 'Sem acesso'; end if;
+  if p_local is null then raise exception 'Local não informado'; end if;
+  if not (is_admin() or exists (select 1 from usuario_locais where usuario_id = auth.uid() and local_id = p_local)) then
+    raise exception 'Sem permissão para este local';
+  end if;
   insert into conferencias(local_id, tipo, usuario_email, total_esperado)
   values (p_local, p_tipo, (select email from perfis where id = auth.uid()),
           (select count(*) from bens where local_id = p_local and status <> 'Baixado'))
@@ -81,6 +85,10 @@ declare v_local uuid;
 begin
   if not is_ativo() then raise exception 'Sem acesso'; end if;
   select local_id into v_local from conferencias where id = p_conf;
+  if not found then raise exception 'Conferência não encontrada'; end if;
+  if not (is_admin() or exists (select 1 from usuario_locais where usuario_id = auth.uid() and local_id = v_local)) then
+    raise exception 'Sem permissão para este local';
+  end if;
   insert into conferencia_itens(conferencia_id,bem_id,resultado)
     select p_conf, b.id, 'Faltante' from bens b
      where b.local_id = v_local and b.status <> 'Baixado'
